@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from openai import OpenAI
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, constants
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, filters, ContextTypes
@@ -791,9 +791,10 @@ async def cmd_rate(upd: Update, _):
     lines.append(f"\n_{tx(lang, 'updated')}: {datetime.now().strftime('%d.%m %H:%M')}_")
     await upd.message.reply_text('\n'.join(lines), parse_mode='Markdown')
 
-async def cmd_advice(upd: Update, _):
+async def cmd_advice(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = upd.effective_user.id
     lang = get_lang(uid)
+    await ctx.bot.send_chat_action(upd.effective_chat.id, constants.ChatAction.TYPING)
     msg  = await upd.message.reply_text(tx(lang, 'advice_wait'))
     text = await ai_advice(uid, lang)
     text = text.replace('**', '*')
@@ -889,6 +890,7 @@ async def on_text(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return  # wait for button press in other states
 
     # ─── MAIN BOT LOGIC ───
+    await ctx.bot.send_chat_action(chat_id, constants.ChatAction.TYPING)
     msg    = await upd.message.reply_text(tx(lang, 'processing'))
     parsed = await ai_parse(text)
 
@@ -925,11 +927,12 @@ async def on_text(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
            json.dumps(parsed.get('items', []), ensure_ascii=False))
     await msg.edit_text(fmt_tx_msg(parsed, lang, rates), parse_mode='Markdown')
 
-async def on_photo(upd: Update, _):
+async def on_photo(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = upd.effective_user.id
     u    = get_user(uid)
     if not u.get('onboarding_done'): return
     lang = u.get('language', 'ru')
+    await ctx.bot.send_chat_action(upd.effective_chat.id, constants.ChatAction.TYPING)
     msg  = await upd.message.reply_text(tx(lang, 'processing'))
 
     photo = upd.message.photo[-1]
@@ -947,11 +950,12 @@ async def on_photo(upd: Update, _):
            json.dumps(parsed.get('items', []), ensure_ascii=False))
     await msg.edit_text(fmt_tx_msg(parsed, lang, rates), parse_mode='Markdown')
 
-async def on_voice(upd: Update, _):
+async def on_voice(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = upd.effective_user.id
     u    = get_user(uid)
     if not u.get('onboarding_done'): return
     lang = u.get('language', 'ru')
+    await ctx.bot.send_chat_action(upd.effective_chat.id, constants.ChatAction.TYPING)
     msg  = await upd.message.reply_text(tx(lang, 'processing'))
 
     vfile = await upd.message.voice.get_file()
