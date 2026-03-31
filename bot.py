@@ -28,13 +28,8 @@ BOT_TOKEN      = os.getenv('BOT_TOKEN', '')
 OPENROUTER_KEY = os.getenv('OPENROUTER_KEY', '')
 OPENAI_KEY     = os.getenv('OPENAI_KEY', '')   # for Whisper voice transcription (optional)
 GROQ_KEY       = os.getenv('GROQ_KEY', '')     # for Groq Whisper — free! (preferred)
-DATABASE_URL   = os.getenv('DATABASE_URL', '')  # PostgreSQL from Railway
-# Railway also provides individual PG variables
-PGHOST     = os.getenv('PGHOST', os.getenv('RAILWAY_PRIVATE_DOMAIN', ''))
-PGPORT     = os.getenv('PGPORT', '5432')
-PGUSER     = os.getenv('PGUSER', 'postgres')
-PGPASSWORD = os.getenv('PGPASSWORD', '')
-PGDATABASE = os.getenv('PGDATABASE', 'railway')
+DATABASE_URL        = os.getenv('DATABASE_URL', '')         # PostgreSQL internal URL
+DATABASE_PUBLIC_URL = os.getenv('DATABASE_PUBLIC_URL', '')  # PostgreSQL public URL (preferred)
 OR_MODEL       = os.getenv('OR_MODEL', 'anthropic/claude-sonnet-4-5')
 TZ             = ZoneInfo('Asia/Tashkent')
 
@@ -310,21 +305,20 @@ def tx(uid_or_lang, key: str, **kwargs) -> str:
     return text
 
 # ────────────────────────── DATABASE (PostgreSQL) ─────────────────
-def get_conn():
-    url = DATABASE_URL
-    # Normalize postgres:// → postgresql://
+def _normalize_pg_url(url: str) -> str:
+    """Normalize postgres:// → postgresql:// for psycopg2."""
     if url.startswith('postgres://'):
-        url = 'postgresql://' + url[len('postgres://'):]
-    if url.startswith('postgresql://'):
-        return psycopg2.connect(url)
-    # Fallback: Railway provides individual PG vars automatically when PG is linked
-    if PGHOST:
-        return psycopg2.connect(
-            host=PGHOST, port=int(PGPORT), user=PGUSER,
-            password=PGPASSWORD, dbname=PGDATABASE,
-            sslmode='require'
-        )
-    raise ValueError('No valid PostgreSQL connection. Set DATABASE_URL (postgresql://...) or link PostgreSQL service in Railway.')
+        return 'postgresql://' + url[len('postgres://'):]
+    return url
+
+def get_conn():
+    # 1️⃣ Prefer public URL (works from Docker, no private networking issues)
+    if DATABASE_PUBLIC_URL:
+        return psycopg2.connect(_normalize_pg_url(DATABASE_PUBLIC_URL))
+    # 2️⃣ Try internal URL
+    if DATABASE_URL:
+        return psycopg2.connect(_normalize_pg_url(DATABASE_URL))
+    raise ValueError('Set DATABASE_PUBLIC_URL or DATABASE_URL in Railway Variables.')
 
 def init_db():
     with get_conn() as conn:
@@ -1175,9 +1169,10 @@ async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
 # ────────────────────────── MAIN ──────────────────────────────────
 def main():
     init_db()
-    if not BOT_TOKEN:                    raise ValueError('BOT_TOKEN not set')
-    if not OPENROUTER_KEY:               raise ValueError('OPENROUTER_KEY not set')
-    if not DATABASE_URL and not PGHOST:  raise ValueError('DATABASE_URL or PGHOST not set — link PostgreSQL in Railway')
+    if not BOT_TOKEN:      raise ValueError('BOT_TOKEN not set')
+    if not OPENROUTER_KEY: raise ValueError('OPENROUTER_KEY not set')
+    if not DATABASE_URL and not DATABASE_PUBLIC_URL:
+        raise ValueError('Set DATABASE_PUBLIC_URL or DATABASE_URL in Railway Variables')
 
     app = Application.builder().token(BOT_TOKEN).build()
 
