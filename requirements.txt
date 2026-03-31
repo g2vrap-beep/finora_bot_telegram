@@ -1,5 +1,4 @@
 python-telegram-bot[job-queue]==21.5
 openai==1.57.0
 requests==2.32.3
-SpeechRecognition==3.10.4
-pydub==0.25.1
+psycopg2-binary==2.9.9

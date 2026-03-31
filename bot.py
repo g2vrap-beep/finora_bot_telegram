@@ -4,12 +4,14 @@
 Telegram bot: учёт финансов + AI советы + умный онбординг + уведомления
 """
 
-import os, json, sqlite3, logging, tempfile, base64, asyncio
+import os, json, logging, tempfile, base64, asyncio
 from datetime import datetime, time as dtime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import requests
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from openai import OpenAI
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, constants
 from telegram.ext import (
@@ -26,7 +28,7 @@ BOT_TOKEN      = os.getenv('BOT_TOKEN', '')
 OPENROUTER_KEY = os.getenv('OPENROUTER_KEY', '')
 OPENAI_KEY     = os.getenv('OPENAI_KEY', '')   # for Whisper voice transcription (optional)
 GROQ_KEY       = os.getenv('GROQ_KEY', '')     # for Groq Whisper — free! (preferred)
-DB_PATH        = os.getenv('DB_PATH', '/data/finora.db')
+DATABASE_URL   = os.getenv('DATABASE_URL', '')  # PostgreSQL from Railway
 OR_MODEL       = os.getenv('OR_MODEL', 'anthropic/claude-sonnet-4-5')
 TZ             = ZoneInfo('Asia/Tashkent')
 
@@ -301,131 +303,157 @@ def tx(uid_or_lang, key: str, **kwargs) -> str:
             pass
     return text
 
-# ────────────────────────── DATABASE ──────────────────────────────
+# ────────────────────────── DATABASE (PostgreSQL) ─────────────────
+def get_conn():
+    return psycopg2.connect(DATABASE_URL)
+
 def init_db():
-    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute('''CREATE TABLE IF NOT EXISTS transactions(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER, type TEXT, amount REAL,
-            description TEXT, category TEXT, items TEXT,
-            currency TEXT DEFAULT 'UZS',
-            created_at TEXT DEFAULT (datetime('now','localtime'))
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS users(
-            user_id INTEGER PRIMARY KEY,
-            language TEXT DEFAULT 'ru',
-            name TEXT DEFAULT '',
-            income_freq TEXT DEFAULT '',
-            income_amt REAL DEFAULT 0,
-            income_currency TEXT DEFAULT 'UZS',
-            side_income REAL DEFAULT 0,
-            goal TEXT DEFAULT '',
-            notify_time TEXT DEFAULT '21:00',
-            notify_enabled INTEGER DEFAULT 1,
-            onboarding_state TEXT DEFAULT 'lang',
-            onboarding_done INTEGER DEFAULT 0
-        )''')
+    with get_conn() as conn:
+        with conn.cursor() as c:
+            c.execute('''CREATE TABLE IF NOT EXISTS transactions(
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT, type TEXT, amount FLOAT,
+                description TEXT, category TEXT, items TEXT,
+                currency TEXT DEFAULT 'UZS',
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )''')
+            c.execute('''CREATE TABLE IF NOT EXISTS users(
+                user_id BIGINT PRIMARY KEY,
+                language TEXT DEFAULT 'ru',
+                name TEXT DEFAULT '',
+                income_freq TEXT DEFAULT '',
+                income_amt FLOAT DEFAULT 0,
+                income_currency TEXT DEFAULT 'UZS',
+                side_income FLOAT DEFAULT 0,
+                goal TEXT DEFAULT '',
+                notify_time TEXT DEFAULT '21:00',
+                notify_enabled INTEGER DEFAULT 1,
+                onboarding_state TEXT DEFAULT 'lang',
+                onboarding_done INTEGER DEFAULT 0
+            )''')
+        conn.commit()
 
 def get_user(uid: int) -> dict:
-    with sqlite3.connect(DB_PATH) as c:
-        cur = c.cursor()
-        cur.execute('INSERT OR IGNORE INTO users(user_id) VALUES(?)', (uid,))
-        cur.execute('SELECT * FROM users WHERE user_id=?', (uid,))
-        row = cur.fetchone()
-        cols = [d[0] for d in cur.description]
-    return dict(zip(cols, row)) if row else {}
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as c:
+            c.execute('INSERT INTO users(user_id) VALUES(%s) ON CONFLICT DO NOTHING', (uid,))
+            conn.commit()
+            c.execute('SELECT * FROM users WHERE user_id=%s', (uid,))
+            row = c.fetchone()
+    return dict(row) if row else {}
 
 def set_user(uid: int, **kwargs):
     if not kwargs: return
-    fields = ', '.join(f'{k}=?' for k in kwargs)
+    fields = ', '.join(f'{k}=%s' for k in kwargs)
     vals   = list(kwargs.values()) + [uid]
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute(f'UPDATE users SET {fields} WHERE user_id=?', vals)
+    with get_conn() as conn:
+        with conn.cursor() as c:
+            c.execute(f'UPDATE users SET {fields} WHERE user_id=%s', vals)
+        conn.commit()
 
 def get_lang(uid: int) -> str:
-    u = get_user(uid)
-    return u.get('language', 'ru')
+    return get_user(uid).get('language', 'ru')
 
 def get_state(uid: int) -> str:
-    u = get_user(uid)
-    return u.get('onboarding_state', STATE_LANG)
+    return get_user(uid).get('onboarding_state', STATE_LANG)
 
 def add_tx(uid: int, type_: str, amount: float, desc: str, cat: str,
            cur: str = 'UZS', items: str = ''):
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute(
-            'INSERT INTO transactions(user_id,type,amount,description,category,items,currency) VALUES(?,?,?,?,?,?,?)',
-            (uid, type_, amount, desc, cat, items, cur)
-        )
-        return c.lastrowid
+    with get_conn() as conn:
+        with conn.cursor() as c:
+            c.execute(
+                'INSERT INTO transactions(user_id,type,amount,description,category,items,currency) VALUES(%s,%s,%s,%s,%s,%s,%s) RETURNING id',
+                (uid, type_, amount, desc, cat, items, cur)
+            )
+            row_id = c.fetchone()[0]
+        conn.commit()
+    return row_id
 
 def get_last_tx(uid: int):
-    with sqlite3.connect(DB_PATH) as c:
-        return c.execute(
-            'SELECT id,type,amount,description,category,currency FROM transactions WHERE user_id=? ORDER BY id DESC LIMIT 1',
-            (uid,)
-        ).fetchone()
+    with get_conn() as conn:
+        with conn.cursor() as c:
+            c.execute(
+                'SELECT id,type,amount,description,category,currency FROM transactions WHERE user_id=%s ORDER BY id DESC LIMIT 1',
+                (uid,)
+            )
+            return c.fetchone()
 
 def update_tx(tx_id: int, amount: float = None, description: str = None):
-    with sqlite3.connect(DB_PATH) as c:
-        if amount is not None:
-            c.execute('UPDATE transactions SET amount=? WHERE id=?', (amount, tx_id))
-        if description is not None:
-            c.execute('UPDATE transactions SET description=? WHERE id=?', (description, tx_id))
+    with get_conn() as conn:
+        with conn.cursor() as c:
+            if amount is not None:
+                c.execute('UPDATE transactions SET amount=%s WHERE id=%s', (amount, tx_id))
+            if description is not None:
+                c.execute('UPDATE transactions SET description=%s WHERE id=%s', (description, tx_id))
+        conn.commit()
 
 def delete_last_tx(uid: int):
-    with sqlite3.connect(DB_PATH) as c:
-        row = c.execute('SELECT id FROM transactions WHERE user_id=? ORDER BY id DESC LIMIT 1', (uid,)).fetchone()
-        if row:
-            c.execute('DELETE FROM transactions WHERE id=?', (row[0],))
-            return True
+    with get_conn() as conn:
+        with conn.cursor() as c:
+            c.execute('SELECT id FROM transactions WHERE user_id=%s ORDER BY id DESC LIMIT 1', (uid,))
+            row = c.fetchone()
+            if row:
+                c.execute('DELETE FROM transactions WHERE id=%s', (row[0],))
+                conn.commit()
+                return True
     return False
 
 def get_stats(uid: int) -> dict:
-    with sqlite3.connect(DB_PATH) as c:
-        rows  = c.execute('SELECT type,SUM(amount),COUNT(*) FROM transactions WHERE user_id=? GROUP BY type', (uid,)).fetchall()
-        month = datetime.now().strftime('%Y-%m')
-        mrows = c.execute(
-            "SELECT type,SUM(amount) FROM transactions WHERE user_id=? AND strftime('%Y-%m',created_at)=? GROUP BY type",
-            (uid, month)
-        ).fetchall()
-        cnt = c.execute('SELECT COUNT(*) FROM transactions WHERE user_id=?', (uid,)).fetchone()[0]
-        # category breakdown this month
-        cats = c.execute(
-            "SELECT category,SUM(amount) FROM transactions WHERE user_id=? AND type='exp' AND strftime('%Y-%m',created_at)=? GROUP BY category ORDER BY SUM(amount) DESC LIMIT 5",
-            (uid, month)
-        ).fetchall()
+    month = datetime.now(TZ).strftime('%Y-%m')
+    with get_conn() as conn:
+        with conn.cursor() as c:
+            c.execute('SELECT type, SUM(amount) FROM transactions WHERE user_id=%s GROUP BY type', (uid,))
+            rows = c.fetchall()
+            c.execute(
+                "SELECT type, SUM(amount) FROM transactions WHERE user_id=%s AND TO_CHAR(created_at AT TIME ZONE 'Asia/Tashkent', 'YYYY-MM')=%s GROUP BY type",
+                (uid, month)
+            )
+            mrows = c.fetchall()
+            c.execute('SELECT COUNT(*) FROM transactions WHERE user_id=%s', (uid,))
+            cnt = c.fetchone()[0]
+            c.execute(
+                "SELECT category, SUM(amount) FROM transactions WHERE user_id=%s AND type='exp' AND TO_CHAR(created_at AT TIME ZONE 'Asia/Tashkent', 'YYYY-MM')=%s GROUP BY category ORDER BY SUM(amount) DESC LIMIT 5",
+                (uid, month)
+            )
+            cats = c.fetchall()
     s = {'inc': 0, 'exp': 0, 'count': cnt, 'm_inc': 0, 'm_exp': 0, 'cats': cats}
     for r in rows:
-        s['inc' if r[0] == 'inc' else 'exp'] = r[1] or 0
+        s['inc' if r[0] == 'inc' else 'exp'] = float(r[1] or 0)
     for r in mrows:
-        s['m_inc' if r[0] == 'inc' else 'm_exp'] = r[1] or 0
+        s['m_inc' if r[0] == 'inc' else 'm_exp'] = float(r[1] or 0)
     return s
 
 def get_history(uid: int, limit=15):
-    with sqlite3.connect(DB_PATH) as c:
-        return c.execute(
-            'SELECT id,type,amount,description,category,currency,created_at FROM transactions WHERE user_id=? ORDER BY id DESC LIMIT ?',
-            (uid, limit)
-        ).fetchall()
+    with get_conn() as conn:
+        with conn.cursor() as c:
+            c.execute(
+                'SELECT id,type,amount,description,category,currency,created_at FROM transactions WHERE user_id=%s ORDER BY id DESC LIMIT %s',
+                (uid, limit)
+            )
+            return c.fetchall()
 
 def get_recent(uid: int, limit=30):
-    with sqlite3.connect(DB_PATH) as c:
-        return c.execute(
-            'SELECT type,amount,description,category,created_at FROM transactions WHERE user_id=? ORDER BY id DESC LIMIT ?',
-            (uid, limit)
-        ).fetchall()
+    with get_conn() as conn:
+        with conn.cursor() as c:
+            c.execute(
+                'SELECT type,amount,description,category,created_at FROM transactions WHERE user_id=%s ORDER BY id DESC LIMIT %s',
+                (uid, limit)
+            )
+            return c.fetchall()
 
 def clear_data(uid: int):
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute('DELETE FROM transactions WHERE user_id=?', (uid,))
+    with get_conn() as conn:
+        with conn.cursor() as c:
+            c.execute('DELETE FROM transactions WHERE user_id=%s', (uid,))
+        conn.commit()
 
 def get_all_users_with_notify():
-    with sqlite3.connect(DB_PATH) as c:
-        return c.execute(
-            'SELECT user_id, name, language, notify_time FROM users WHERE notify_enabled=1 AND onboarding_done=1 AND notify_time != ""',
-        ).fetchall()
+    with get_conn() as conn:
+        with conn.cursor() as c:
+            c.execute(
+                "SELECT user_id, name, language, notify_time FROM users WHERE notify_enabled=1 AND onboarding_done=1 AND notify_time != ''"
+            )
+            return c.fetchall()
 
 # ────────────────────────── CURRENCY ──────────────────────────────
 def get_rates() -> dict:
@@ -1130,6 +1158,7 @@ def main():
     init_db()
     if not BOT_TOKEN:      raise ValueError('BOT_TOKEN not set')
     if not OPENROUTER_KEY: raise ValueError('OPENROUTER_KEY not set')
+    if not DATABASE_URL:   raise ValueError('DATABASE_URL not set')
 
     app = Application.builder().token(BOT_TOKEN).build()
 
