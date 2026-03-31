@@ -4,7 +4,7 @@
 Telegram bot: учёт финансов + AI советы + умный онбординг + уведомления
 """
 
-import os, json, logging, tempfile, base64, asyncio
+import os, json, logging, tempfile, base64, asyncio, threading, hashlib, hmac
 from datetime import datetime, time as dtime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -18,6 +18,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, filters, ContextTypes
 )
+from flask import Flask, render_template, request, session, redirect, url_for, jsonify
 
 VOICE_OK = True  # always True — using Whisper API
 
@@ -1286,6 +1287,122 @@ async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.warning(f'Reminder failed for {uid}: {e}')
 
+# ──────────────────────── FLASK WEB DASHBOARD ────────────────────
+flask_app = Flask(__name__, template_folder='templates')
+flask_app.secret_key = os.getenv('FLASK_SECRET_KEY', '7f3b9d2a8e5c1f6a4b7e9c3d5f8a2b4c6e1d3f5a7b9c2e4f6a8b1c3d5e7f9a2b')
+
+def verify_telegram_auth(auth_data: dict) -> bool:
+    """Проверка данных от Telegram Login Widget"""
+    check_hash = auth_data.get('hash')
+    if not check_hash:
+        return False
+    
+    auth_copy = dict(auth_data)
+    del auth_copy['hash']
+    
+    data_check_arr = [f'{k}={v}' for k, v in sorted(auth_copy.items())]
+    data_check_string = '\n'.join(data_check_arr)
+    
+    secret_key = hashlib.sha256(BOT_TOKEN.encode()).digest()
+    hash_value = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+    
+    if hash_value != check_hash:
+        return False
+    
+    # Проверка времени (данные действительны 24 часа)
+    auth_date = int(auth_data.get('auth_date', 0))
+    if datetime.now().timestamp() - auth_date > 86400:
+        return False
+    
+    return True
+
+def get_user_stats_web(user_id: int) -> dict:
+    """Получить статистику для веб-дашборда"""
+    month = datetime.now(TZ).strftime('%Y-%m')
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as c:
+            # Общая статистика
+            c.execute('SELECT type, SUM(amount) as total FROM transactions WHERE user_id=%s GROUP BY type', (user_id,))
+            totals = {row['type']: float(row['total']) for row in c.fetchall()}
+            
+            # Статистика за месяц
+            c.execute(
+                "SELECT type, SUM(amount) as total FROM transactions WHERE user_id=%s AND TO_CHAR(created_at AT TIME ZONE 'Asia/Tashkent', 'YYYY-MM')=%s GROUP BY type",
+                (user_id, month)
+            )
+            month_totals = {row['type']: float(row['total']) for row in c.fetchall()}
+            
+            # Топ категории расходов
+            c.execute(
+                "SELECT category, SUM(amount) as total FROM transactions WHERE user_id=%s AND type='exp' AND TO_CHAR(created_at AT TIME ZONE 'Asia/Tashkent', 'YYYY-MM')=%s GROUP BY category ORDER BY total DESC LIMIT 10",
+                (user_id, month)
+            )
+            categories = [dict(row) for row in c.fetchall()]
+            
+            # Последние транзакции
+            c.execute(
+                'SELECT id, type, amount, description, category, currency, created_at FROM transactions WHERE user_id=%s ORDER BY created_at DESC LIMIT 50',
+                (user_id,)
+            )
+            transactions = [dict(row) for row in c.fetchall()]
+            
+            # Информация о пользователе
+            c.execute('SELECT * FROM users WHERE user_id=%s', (user_id,))
+            user_info = dict(c.fetchone() or {})
+    
+    return {
+        'total_income': totals.get('inc', 0),
+        'total_expense': totals.get('exp', 0),
+        'balance': totals.get('inc', 0) - totals.get('exp', 0),
+        'month_income': month_totals.get('inc', 0),
+        'month_expense': month_totals.get('exp', 0),
+        'month_balance': month_totals.get('inc', 0) - month_totals.get('exp', 0),
+        'categories': categories,
+        'transactions': transactions,
+        'user_info': user_info
+    }
+
+@flask_app.route('/')
+def web_index():
+    """Главная страница - вход или дашборд"""
+    if 'user_id' not in session:
+        return render_template('login.html', bot_token=BOT_TOKEN)
+    
+    user_id = session['user_id']
+    stats = get_user_stats_web(user_id)
+    
+    return render_template('dashboard.html', 
+                         user_name=session.get('first_name', 'Пользователь'),
+                         stats=stats)
+
+@flask_app.route('/auth/telegram', methods=['POST'])
+def web_telegram_auth():
+    """Обработка авторизации через Telegram"""
+    auth_data = request.form.to_dict()
+    
+    if not verify_telegram_auth(auth_data):
+        return jsonify({'error': 'Ошибка авторизации'}), 403
+    
+    # Сохраняем данные в сессию
+    session['user_id'] = int(auth_data['id'])
+    session['first_name'] = auth_data.get('first_name', '')
+    session['last_name'] = auth_data.get('last_name', '')
+    session['username'] = auth_data.get('username', '')
+    session['photo_url'] = auth_data.get('photo_url', '')
+    
+    return redirect(url_for('web_index'))
+
+@flask_app.route('/logout')
+def web_logout():
+    """Выход из системы"""
+    session.clear()
+    return redirect(url_for('web_index'))
+
+def run_flask():
+    """Run Flask in a separate thread"""
+    port = int(os.getenv('PORT', 5000))
+    flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
 # ──────────────────────── BOT UI SETUP ────────────────────────────
 async def setup_bot_ui(app: Application):
     """Setup bot commands and menu button"""
@@ -1325,6 +1442,11 @@ def main():
     if not OPENROUTER_KEY: raise ValueError('OPENROUTER_KEY not set')
     if not DATABASE_URL and not DATABASE_PUBLIC_URL:
         raise ValueError('Set DATABASE_PUBLIC_URL or DATABASE_URL in Railway Variables')
+
+    # Start Flask web server in background thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info('🌐 Flask dashboard started in background')
 
     app = Application.builder().token(BOT_TOKEN).build()
 
