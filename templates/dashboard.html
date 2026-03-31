@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>💎 Finora Dashboard</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
         * {
             margin: 0;
@@ -17,10 +18,8 @@
             background: #0a0a0a;
             color: #fff;
             overflow-x: hidden;
-            position: relative;
         }
         
-        /* Animated background particles */
         .bg-particles {
             position: fixed;
             width: 100%;
@@ -52,7 +51,6 @@
             padding-bottom: 40px;
         }
         
-        /* Header */
         .header {
             display: flex;
             justify-content: space-between;
@@ -75,7 +73,6 @@
             color: #888;
         }
         
-        /* Goal Progress Circle - Main Feature */
         .goal-card {
             background: linear-gradient(145deg, #1a1a1a 0%, #0f0f0f 100%);
             border-radius: 30px;
@@ -177,7 +174,6 @@
             letter-spacing: 1px;
         }
         
-        /* Balance Card */
         .balance-card {
             background: linear-gradient(145deg, #1a1a1a 0%, #0f0f0f 100%);
             border-radius: 25px;
@@ -213,7 +209,6 @@
             background-clip: text;
         }
         
-        /* Stats Grid */
         .stats-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -226,8 +221,6 @@
             border-radius: 20px;
             padding: 20px;
             border: 1px solid rgba(102, 126, 234, 0.1);
-            position: relative;
-            overflow: hidden;
         }
         
         .stat-icon {
@@ -250,21 +243,6 @@
             color: #fff;
         }
         
-        .stat-value.income {
-            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-        
-        .stat-value.expense {
-            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-        
-        /* Categories Bubbles */
         .categories-section {
             background: linear-gradient(145deg, #1a1a1a 0%, #0f0f0f 100%);
             border-radius: 25px;
@@ -291,7 +269,6 @@
         }
         
         .bubble {
-            position: relative;
             padding: 12px 20px;
             border-radius: 20px;
             font-size: 13px;
@@ -299,13 +276,10 @@
             background: linear-gradient(135deg, rgba(102, 126, 234, 0.2), rgba(240, 147, 251, 0.2));
             border: 1px solid rgba(102, 126, 234, 0.3);
             box-shadow: 0 4px 15px rgba(102, 126, 234, 0.2);
-            animation: float 3s infinite ease-in-out;
-            animation-delay: calc(var(--i) * 0.2s);
         }
         
         .bubble-label {
             color: #fff;
-            margin-bottom: 2px;
             font-size: 12px;
         }
         
@@ -314,7 +288,6 @@
             font-size: 11px;
         }
         
-        /* Transactions List */
         .transactions-section {
             background: linear-gradient(145deg, #1a1a1a 0%, #0f0f0f 100%);
             border-radius: 25px;
@@ -371,7 +344,6 @@
         .transaction-amount {
             font-size: 16px;
             font-weight: 700;
-            text-align: right;
         }
         
         .transaction-amount.income {
@@ -382,20 +354,18 @@
             color: #ef4444;
         }
         
-        /* Empty State */
         .empty-state {
             text-align: center;
             padding: 40px 20px;
             color: #666;
         }
         
-        .empty-icon {
-            font-size: 48px;
-            margin-bottom: 15px;
-            opacity: 0.5;
+        .loading {
+            text-align: center;
+            padding: 50px 20px;
+            color: #888;
         }
         
-        /* Scrollbar */
         ::-webkit-scrollbar {
             width: 6px;
         }
@@ -411,147 +381,192 @@
     </style>
 </head>
 <body>
-    <!-- Animated Background -->
     <div class="bg-particles">
         <div class="particle" style="width: 100px; height: 100px; top: 10%; left: 10%; animation-delay: 0s;"></div>
         <div class="particle" style="width: 150px; height: 150px; top: 60%; left: 70%; animation-delay: 3s;"></div>
         <div class="particle" style="width: 80px; height: 80px; top: 80%; left: 20%; animation-delay: 6s;"></div>
     </div>
     
-    <div class="container">
-        <!-- Header -->
-        <div class="header">
-            <div class="logo">💎 FINORA</div>
-            <div class="user-name">{{ user_name }}</div>
-        </div>
-        
-        <!-- Goal Progress Circle -->
-        {% if stats.user_info.goal %}
-        <div class="goal-card">
-            <div class="goal-header">
-                <div class="goal-title">🎯 Твоя цель</div>
-                <div class="goal-text">{{ stats.user_info.goal }}</div>
-            </div>
-            
-            <div class="progress-circle-wrapper">
-                <svg class="progress-ring" width="220" height="220">
-                    <defs>
-                        <linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                            <stop offset="0%" style="stop-color:#667eea;stop-opacity:1" />
-                            <stop offset="100%" style="stop-color:#f093fb;stop-opacity:1" />
-                        </linearGradient>
-                    </defs>
-                    <circle class="progress-ring-bg" cx="110" cy="110" r="95"/>
-                    <circle class="progress-ring-fill" cx="110" cy="110" r="95"
-                            id="progressCircle"
-                            stroke-dasharray="597" 
-                            stroke-dashoffset="597"/>
-                </svg>
-                <div class="progress-center">
-                    <div class="progress-percentage" id="progressPercent">0%</div>
-                    <div class="progress-label">Прогресс</div>
-                </div>
-            </div>
-        </div>
-        {% endif %}
-        
-        <!-- Balance Card -->
-        <div class="balance-card">
-            <div class="balance-label">💰 Баланс</div>
-            <div class="balance-amount {% if stats.balance < 0 %}negative{% endif %}">
-                {{ "{:,.0f}".format(stats.balance).replace(',', ' ') }}
-            </div>
-            <div style="font-size: 12px; color: #666; margin-top: 5px;">so'm</div>
-        </div>
-        
-        <!-- Stats Grid -->
-        <div class="stats-grid">
-            <div class="stat-card">
-                <div class="stat-icon">📈</div>
-                <div class="stat-label">Доходы</div>
-                <div class="stat-value income">{{ "{:,.0f}".format(stats.month_income).replace(',', ' ') }}</div>
-            </div>
-            
-            <div class="stat-card">
-                <div class="stat-icon">📉</div>
-                <div class="stat-label">Расходы</div>
-                <div class="stat-value expense">{{ "{:,.0f}".format(stats.month_expense).replace(',', ' ') }}</div>
-            </div>
-        </div>
-        
-        <!-- Categories Bubbles -->
-        {% if stats.categories %}
-        <div class="categories-section">
-            <div class="section-title">
-                <span>🔥</span>
-                <span>Топ расходы</span>
-            </div>
-            <div class="bubbles-container">
-                {% for cat in stats.categories[:6] %}
-                <div class="bubble" style="--i: {{ loop.index }};">
-                    <div class="bubble-label">{{ cat.category }}</div>
-                    <div class="bubble-value">{{ "{:,.0f}".format(cat.total).replace(',', ' ') }}</div>
-                </div>
-                {% endfor %}
-            </div>
-        </div>
-        {% endif %}
-        
-        <!-- Transactions List -->
-        <div class="transactions-section">
-            <div class="section-title">
-                <span>📋</span>
-                <span>Последние транзакции</span>
-            </div>
-            
-            {% if stats.transactions %}
-                {% for tx in stats.transactions[:15] %}
-                <div class="transaction-item">
-                    <div class="transaction-left">
-                        <div class="transaction-icon">
-                            {% if tx.type == 'inc' %}📈{% else %}📉{% endif %}
-                        </div>
-                        <div class="transaction-info">
-                            <div class="transaction-desc">{{ tx.description or tx.category }}</div>
-                            <div class="transaction-meta">
-                                {{ tx.category }} • {{ tx.created_at.strftime('%d.%m %H:%M') if tx.created_at else '' }}
-                            </div>
-                        </div>
-                    </div>
-                    <div class="transaction-amount {% if tx.type == 'inc' %}income{% else %}expense{% endif %}">
-                        {% if tx.type == 'inc' %}+{% else %}-{% endif %}{{ "{:,.0f}".format(tx.amount).replace(',', ' ') }}
-                    </div>
-                </div>
-                {% endfor %}
-            {% else %}
-                <div class="empty-state">
-                    <div class="empty-icon">📭</div>
-                    <div>Пока нет транзакций</div>
-                    <div style="font-size: 12px; margin-top: 10px;">Начни записывать в боте!</div>
-                </div>
-            {% endif %}
-        </div>
+    <div class="container" id="app">
+        <div class="loading">⏳ Загрузка...</div>
     </div>
     
     <script>
-        // Animate progress circle
-        {% if stats.user_info.goal and stats.user_info.income_amt %}
-        const targetProgress = Math.min({{ ((stats.balance / stats.user_info.income_amt) * 100) | int }}, 150);
-        {% else %}
-        const targetProgress = 0;
-        {% endif %}
+        // Initialize Telegram WebApp
+        const tg = window.Telegram.WebApp;
+        tg.ready();
+        tg.expand();
         
-        const circle = document.getElementById('progressCircle');
-        const percentText = document.getElementById('progressPercent');
-        const circumference = 2 * Math.PI * 95; // radius = 95
+        // Get user data from Telegram
+        const user = tg.initDataUnsafe.user || {};
+        const userName = user.first_name || 'Пользователь';
+        const userId = user.id;
         
-        function animateProgress(progress) {
-            const offset = circumference - (progress / 100) * circumference;
-            circle.style.strokeDashoffset = offset;
+        // Load stats from API
+        async function loadStats() {
+            try {
+                const response = await fetch(`/api/stats?initData=${encodeURIComponent(tg.initData)}`);
+                if (!response.ok) throw new Error('Failed to load stats');
+                
+                const data = await response.json();
+                renderDashboard(data);
+            } catch (error) {
+                console.error('Error loading stats:', error);
+                document.getElementById('app').innerHTML = '<div class="loading">❌ Ошибка загрузки</div>';
+            }
         }
         
-        // Animate from 0 to target
-        setTimeout(() => {
+        function formatNumber(n) {
+            return Math.floor(n).toLocaleString('ru-RU').replace(/,/g, ' ');
+        }
+        
+        function renderDashboard(stats) {
+            const hasGoal = stats.user_info && stats.user_info.goal;
+            const progress = hasGoal && stats.user_info.income_amt > 0 
+                ? Math.min(Math.floor((stats.balance / stats.user_info.income_amt) * 100), 150)
+                : 0;
+            
+            let html = `
+                <div class="header">
+                    <div class="logo">💎 FINORA</div>
+                    <div class="user-name">${userName}</div>
+                </div>
+            `;
+            
+            // Goal card
+            if (hasGoal) {
+                html += `
+                    <div class="goal-card">
+                        <div class="goal-header">
+                            <div class="goal-title">🎯 Твоя цель</div>
+                            <div class="goal-text">${stats.user_info.goal}</div>
+                        </div>
+                        <div class="progress-circle-wrapper">
+                            <svg class="progress-ring" width="220" height="220">
+                                <defs>
+                                    <linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                                        <stop offset="0%" style="stop-color:#667eea;stop-opacity:1" />
+                                        <stop offset="100%" style="stop-color:#f093fb;stop-opacity:1" />
+                                    </linearGradient>
+                                </defs>
+                                <circle class="progress-ring-bg" cx="110" cy="110" r="95"/>
+                                <circle class="progress-ring-fill" cx="110" cy="110" r="95"
+                                        id="progressCircle"
+                                        stroke-dasharray="597" 
+                                        stroke-dashoffset="597"/>
+                            </svg>
+                            <div class="progress-center">
+                                <div class="progress-percentage" id="progressPercent">0%</div>
+                                <div class="progress-label">Прогресс</div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+            
+            // Balance card
+            const balanceClass = stats.balance < 0 ? 'negative' : '';
+            html += `
+                <div class="balance-card">
+                    <div class="balance-label">💰 Баланс</div>
+                    <div class="balance-amount ${balanceClass}">${formatNumber(stats.balance)}</div>
+                    <div style="font-size: 12px; color: #666; margin-top: 5px;">so'm</div>
+                </div>
+            `;
+            
+            // Stats grid
+            html += `
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon">📈</div>
+                        <div class="stat-label">Доходы</div>
+                        <div class="stat-value">${formatNumber(stats.month_income)}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">📉</div>
+                        <div class="stat-label">Расходы</div>
+                        <div class="stat-value">${formatNumber(stats.month_expense)}</div>
+                    </div>
+                </div>
+            `;
+            
+            // Categories bubbles
+            if (stats.categories && stats.categories.length > 0) {
+                html += `
+                    <div class="categories-section">
+                        <div class="section-title">
+                            <span>🔥</span>
+                            <span>Топ расходы</span>
+                        </div>
+                        <div class="bubbles-container">
+                `;
+                stats.categories.slice(0, 6).forEach(cat => {
+                    html += `
+                        <div class="bubble">
+                            <div class="bubble-label">${cat.category}</div>
+                            <div class="bubble-value">${formatNumber(cat.total)}</div>
+                        </div>
+                    `;
+                });
+                html += `
+                        </div>
+                    </div>
+                `;
+            }
+            
+            // Transactions list
+            html += `
+                <div class="transactions-section">
+                    <div class="section-title">
+                        <span>📋</span>
+                        <span>Последние транзакции</span>
+                    </div>
+            `;
+            
+            if (stats.transactions && stats.transactions.length > 0) {
+                stats.transactions.slice(0, 15).forEach(tx => {
+                    const icon = tx.type === 'inc' ? '📈' : '📉';
+                    const amountClass = tx.type === 'inc' ? 'income' : 'expense';
+                    const sign = tx.type === 'inc' ? '+' : '-';
+                    
+                    html += `
+                        <div class="transaction-item">
+                            <div class="transaction-left">
+                                <div class="transaction-icon">${icon}</div>
+                                <div class="transaction-info">
+                                    <div class="transaction-desc">${tx.description || tx.category}</div>
+                                    <div class="transaction-meta">${tx.category} • ${tx.created_at || ''}</div>
+                                </div>
+                            </div>
+                            <div class="transaction-amount ${amountClass}">${sign}${formatNumber(tx.amount)}</div>
+                        </div>
+                    `;
+                });
+            } else {
+                html += `
+                    <div class="empty-state">
+                       <div style="font-size: 48px; margin-bottom: 15px; opacity: 0.5;">📭</div>
+                        <div>Пока нет транзакций</div>
+                        <div style="font-size: 12px; margin-top: 10px;">Начни записывать в боте!</div>
+                    </div>
+                `;
+            }
+            
+            html += `</div>`;
+            
+            document.getElementById('app').innerHTML = html;
+            
+            // Animate progress circle
+            if (hasGoal && progress > 0) {
+                setTimeout(() => animateProgress(progress), 300);
+            }
+        }
+        
+        function animateProgress(targetProgress) {
+            const circle = document.getElementById('progressCircle');
+            const percentText = document.getElementById('progressPercent');
+            const circumference = 2 * Math.PI * 95;
+            
             let current = 0;
             const interval = setInterval(() => {
                 if (current >= targetProgress) {
@@ -560,10 +575,15 @@
                 }
                 current += 2;
                 if (current > targetProgress) current = targetProgress;
-                animateProgress(current);
+                
+                const offset = circumference - (current / 100) * circumference;
+                circle.style.strokeDashoffset = offset;
                 percentText.textContent = current + '%';
             }, 20);
-        }, 300);
+        }
+        
+        // Load stats on page load
+        loadStats();
     </script>
 </body>
 </html>

@@ -1364,39 +1364,44 @@ def get_user_stats_web(user_id: int) -> dict:
 
 @flask_app.route('/')
 def web_index():
-    """Главная страница - вход или дашборд"""
-    if 'user_id' not in session:
-        return render_template('login.html', bot_token=BOT_TOKEN)
-    
-    user_id = session['user_id']
-    stats = get_user_stats_web(user_id)
-    
-    return render_template('dashboard.html', 
-                         user_name=session.get('first_name', 'Пользователь'),
-                         stats=stats)
+    """Главная страница - дашборд для Telegram WebApp"""
+    # For Telegram WebApp - user data comes from initData
+    return render_template('dashboard.html')
 
-@flask_app.route('/auth/telegram', methods=['POST'])
-def web_telegram_auth():
-    """Обработка авторизации через Telegram"""
-    auth_data = request.form.to_dict()
+@flask_app.route('/api/stats')
+def api_user_stats():
+    """API для получения статистики пользователя"""
+    import urllib.parse
     
-    if not verify_telegram_auth(auth_data):
-        return jsonify({'error': 'Ошибка авторизации'}), 403
+    # Get initData from Telegram WebApp
+    init_data = request.args.get('initData', '')
+    if not init_data:
+        return jsonify({'error': 'No initData'}), 401
     
-    # Сохраняем данные в сессию
-    session['user_id'] = int(auth_data['id'])
-    session['first_name'] = auth_data.get('first_name', '')
-    session['last_name'] = auth_data.get('last_name', '')
-    session['username'] = auth_data.get('username', '')
-    session['photo_url'] = auth_data.get('photo_url', '')
-    
-    return redirect(url_for('web_index'))
-
-@flask_app.route('/logout')
-def web_logout():
-    """Выход из системы"""
-    session.clear()
-    return redirect(url_for('web_index'))
+    # Parse initData
+    try:
+        params = urllib.parse.parse_qs(init_data)
+        user_json = params.get('user', [''])[0]
+        if not user_json:
+            return jsonify({'error': 'No user data'}), 401
+        
+        user_data = json.loads(user_json)
+        user_id = int(user_data['id'])
+        user_name = user_data.get('first_name', 'Пользователь')
+        
+        # Get stats
+        stats = get_user_stats_web(user_id)
+        stats['user_name'] = user_name
+        
+        # Convert datetime to strings
+        for tx in stats['transactions']:
+            if tx.get('created_at'):
+                tx['created_at'] = tx['created_at'].strftime('%d.%m.%Y %H:%M')
+        
+        return jsonify(stats)
+    except Exception as e:
+        logger.error(f'Error getting stats: {e}')
+        return jsonify({'error': str(e)}), 500
 
 def run_flask():
     """Run Flask in a separate thread"""
