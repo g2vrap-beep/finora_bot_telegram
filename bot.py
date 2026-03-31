@@ -504,7 +504,7 @@ def build_advisor_system(user: dict, lang: str) -> str:
 
 async def ai_parse(text: str) -> dict | None:
     try:
-        raw = _chat(_PARSE_SYS, text, 300)
+        raw = await asyncio.to_thread(_chat, _PARSE_SYS, text, 300)
         raw = raw.replace('```json', '').replace('```', '').strip()
         return json.loads(raw)
     except:
@@ -517,7 +517,7 @@ async def ai_parse_photo(img_bytes: bytes, mime: str) -> dict | None:
             {'type': 'image_url', 'image_url': {'url': f'data:{mime};base64,{b64}'}},
             {'type': 'text', 'text': 'Read this receipt'},
         ]
-        raw = _chat(_PHOTO_SYS, content, 300)
+        raw = await asyncio.to_thread(_chat, _PHOTO_SYS, content, 300)
         raw = raw.replace('```json', '').replace('```', '').strip()
         return json.loads(raw)
     except:
@@ -527,7 +527,7 @@ async def ai_advice(uid: int, lang: str) -> str:
     user  = get_user(uid)
     rows  = get_recent(uid)
     stats = get_stats(uid)
-    rates = get_rates()
+    rates = await asyncio.to_thread(get_rates)
 
     prompt = (f"Данные пользователя:\n"
               f"Доходы всего: {uzs(stats['inc'])}\n"
@@ -539,29 +539,27 @@ async def ai_advice(uid: int, lang: str) -> str:
               f"\n\nПоследние транзакции:\n" +
               '\n'.join(f"{'➕' if r[0] == 'inc' else '➖'} {uzs(r[1])} — {r[2]} ({r[3]})" for r in rows[:20]))
     try:
-        sys = build_advisor_system(user, lang)
-        return _chat(sys, prompt, 700)
+        sys_prompt = build_advisor_system(user, lang)
+        return await asyncio.to_thread(_chat, sys_prompt, prompt, 700)
     except:
         return '❌ Ошибка.' if lang == 'ru' else '❌ Xatolik.'
 
 async def ai_chat(uid: int, lang: str, text: str) -> str:
     user  = get_user(uid)
     stats = get_stats(uid)
-    rates = get_rates()
 
     ctx = (f"Финансы: доходы {uzs(stats['inc'])}, расходы {uzs(stats['exp'])}, "
            f"баланс {uzs(stats['inc'] - stats['exp'])}. "
            f"Этот месяц: -{uzs(stats['m_exp'])} / +{uzs(stats['m_inc'])}.")
-    sys = build_advisor_system(user, lang)
-    full_sys = sys + f"\n\nКонтекст: {ctx}"
+    sys_prompt = build_advisor_system(user, lang) + f"\n\nКонтекст: {ctx}"
     try:
-        return _chat(full_sys, text, 600)
+        return await asyncio.to_thread(_chat, sys_prompt, text, 600)
     except:
         return '❌ Ошибка.' if lang == 'ru' else '❌ Xatolik.'
 
 # ────────────────────────── VOICE (Groq Whisper — free!) ──────────
-async def transcribe(ogg_path: str, lang: str) -> str | None:
-    """Transcribe .ogg voice: tries Groq first (free), then OpenAI."""
+def _transcribe_sync(ogg_path: str, lang: str) -> str | None:
+    """Sync transcribe — runs in thread pool to avoid blocking event loop."""
     with open(ogg_path, 'rb') as f:
         ogg_bytes = f.read()
     hint = 'ru' if lang == 'ru' else 'uz'
@@ -601,6 +599,9 @@ async def transcribe(ogg_path: str, lang: str) -> str | None:
             logger.warning(f'OpenAI transcribe error: {e}')
 
     return None
+
+async def transcribe(ogg_path: str, lang: str) -> str | None:
+    return await asyncio.to_thread(_transcribe_sync, ogg_path, lang)
 
 # ────────────────────────── FORMATTERS ────────────────────────────
 def fmt_tx_msg(parsed: dict, lang: str, rates: dict) -> str:
