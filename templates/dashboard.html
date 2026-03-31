@@ -2,189 +2,376 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Finora Dashboard — {{ user_name }}</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>💎 Finora Dashboard</title>
     <style>
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
         }
         
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: #f5f7fa;
-            color: #333;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0a0a0a;
+            color: #fff;
+            overflow-x: hidden;
+            position: relative;
         }
         
-        .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 20px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        /* Animated background particles */
+        .bg-particles {
+            position: fixed;
+            width: 100%;
+            height: 100%;
+            top: 0;
+            left: 0;
+            z-index: 0;
+            pointer-events: none;
         }
         
-        .header-content {
-            max-width: 1200px;
-            margin: 0 auto;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
+        .particle {
+            position: absolute;
+            background: radial-gradient(circle, rgba(102, 126, 234, 0.3), transparent);
+            border-radius: 50%;
+            animation: float 20s infinite ease-in-out;
         }
         
-        .logo {
-            font-size: 32px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        
-        .logout-btn {
-            background: rgba(255,255,255,0.2);
-            border: none;
-            color: white;
-            padding: 10px 20px;
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 14px;
-            transition: background 0.3s;
-        }
-        
-        .logout-btn:hover {
-            background: rgba(255,255,255,0.3);
+        @keyframes float {
+            0%, 100% { transform: translateY(0) translateX(0); }
+            50% { transform: translateY(-30px) translateX(20px); }
         }
         
         .container {
-            max-width: 1200px;
-            margin: 30px auto;
-            padding: 0 20px;
+            position: relative;
+            z-index: 1;
+            max-width: 480px;
+            margin: 0 auto;
+            padding: 20px;
+            padding-bottom: 40px;
         }
         
-        .welcome {
-            background: white;
-            padding: 30px;
-            border-radius: 12px;
-            margin-bottom: 30px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-        }
-        
-        .welcome h1 {
-            font-size: 28px;
-            margin-bottom: 10px;
-            color: #667eea;
-        }
-        
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }
-        
-        .stat-card {
-            background: white;
-            padding: 25px;
-            border-radius: 12px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-        }
-        
-        .stat-icon {
-            font-size: 32px;
-            margin-bottom: 10px;
-        }
-        
-        .stat-label {
-            color: #666;
-            font-size: 14px;
-            margin-bottom: 5px;
-        }
-        
-        .stat-value {
-            font-size: 28px;
-            font-weight: bold;
-            color: #333;
-        }
-        
-        .stat-value.positive {
-            color: #10b981;
-        }
-        
-        .stat-value.negative {
-            color: #ef4444;
-        }
-        
-        .charts-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }
-        
-        .chart-card {
-            background: white;
-            padding: 25px;
-            border-radius: 12px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-        }
-        
-        .chart-card h3 {
-            margin-bottom: 20px;
-            color: #333;
-        }
-        
-        .transactions-section {
-            background: white;
-            padding: 25px;
-            border-radius: 12px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-        }
-        
-        .transactions-section h3 {
-            margin-bottom: 20px;
-            color: #333;
-        }
-        
-        .transaction-list {
-            max-height: 500px;
-            overflow-y: auto;
-        }
-        
-        .transaction-item {
-            padding: 15px;
-            border-bottom: 1px solid #f0f0f0;
+        /* Header */
+        .header {
             display: flex;
             justify-content: space-between;
             align-items: center;
+            margin-bottom: 30px;
+            padding: 0 5px;
+        }
+        
+        .logo {
+            font-size: 24px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #667eea 0%, #f093fb 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .user-name {
+            font-size: 14px;
+            color: #888;
+        }
+        
+        /* Goal Progress Circle - Main Feature */
+        .goal-card {
+            background: linear-gradient(145deg, #1a1a1a 0%, #0f0f0f 100%);
+            border-radius: 30px;
+            padding: 30px;
+            margin-bottom: 25px;
+            box-shadow: 0 8px 32px rgba(102, 126, 234, 0.1);
+            border: 1px solid rgba(102, 126, 234, 0.1);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .goal-card::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(102, 126, 234, 0.1) 0%, transparent 70%);
+            animation: pulse 4s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 0.5; transform: scale(1); }
+            50% { opacity: 1; transform: scale(1.1); }
+        }
+        
+        .goal-header {
+            text-align: center;
+            margin-bottom: 20px;
+            position: relative;
+            z-index: 1;
+        }
+        
+        .goal-title {
+            font-size: 14px;
+            color: #888;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+        
+        .goal-text {
+            font-size: 16px;
+            color: #fff;
+            font-weight: 500;
+        }
+        
+        .progress-circle-wrapper {
+            position: relative;
+            width: 220px;
+            height: 220px;
+            margin: 20px auto;
+            z-index: 1;
+        }
+        
+        .progress-ring {
+            transform: rotate(-90deg);
+        }
+        
+        .progress-ring-bg {
+            fill: none;
+            stroke: #1a1a1a;
+            stroke-width: 12;
+        }
+        
+        .progress-ring-fill {
+            fill: none;
+            stroke: url(#gradient);
+            stroke-width: 12;
+            stroke-linecap: round;
+            transition: stroke-dashoffset 1s ease;
+            filter: drop-shadow(0 0 10px rgba(102, 126, 234, 0.5));
+        }
+        
+        .progress-center {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+        }
+        
+        .progress-percentage {
+            font-size: 48px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #667eea 0%, #f093fb 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            line-height: 1;
+            margin-bottom: 5px;
+        }
+        
+        .progress-label {
+            font-size: 12px;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        /* Balance Card */
+        .balance-card {
+            background: linear-gradient(145deg, #1a1a1a 0%, #0f0f0f 100%);
+            border-radius: 25px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 8px 32px rgba(102, 126, 234, 0.1);
+            border: 1px solid rgba(102, 126, 234, 0.1);
+            text-align: center;
+        }
+        
+        .balance-label {
+            font-size: 14px;
+            color: #888;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+        
+        .balance-amount {
+            font-size: 42px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            line-height: 1.2;
+        }
+        
+        .balance-amount.negative {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        /* Stats Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+        
+        .stat-card {
+            background: linear-gradient(145deg, #1a1a1a 0%, #0f0f0f 100%);
+            border-radius: 20px;
+            padding: 20px;
+            border: 1px solid rgba(102, 126, 234, 0.1);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .stat-icon {
+            font-size: 28px;
+            margin-bottom: 10px;
+            filter: drop-shadow(0 0 8px rgba(102, 126, 234, 0.5));
+        }
+        
+        .stat-label {
+            font-size: 11px;
+            color: #888;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .stat-value {
+            font-size: 20px;
+            font-weight: 700;
+            color: #fff;
+        }
+        
+        .stat-value.income {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .stat-value.expense {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        /* Categories Bubbles */
+        .categories-section {
+            background: linear-gradient(145deg, #1a1a1a 0%, #0f0f0f 100%);
+            border-radius: 25px;
+            padding: 25px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(102, 126, 234, 0.1);
+        }
+        
+        .section-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 20px;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .bubbles-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            justify-content: center;
+        }
+        
+        .bubble {
+            position: relative;
+            padding: 12px 20px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 500;
+            background: linear-gradient(135deg, rgba(102, 126, 234, 0.2), rgba(240, 147, 251, 0.2));
+            border: 1px solid rgba(102, 126, 234, 0.3);
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.2);
+            animation: float 3s infinite ease-in-out;
+            animation-delay: calc(var(--i) * 0.2s);
+        }
+        
+        .bubble-label {
+            color: #fff;
+            margin-bottom: 2px;
+            font-size: 12px;
+        }
+        
+        .bubble-value {
+            color: #888;
+            font-size: 11px;
+        }
+        
+        /* Transactions List */
+        .transactions-section {
+            background: linear-gradient(145deg, #1a1a1a 0%, #0f0f0f 100%);
+            border-radius: 25px;
+            padding: 25px;
+            border: 1px solid rgba(102, 126, 234, 0.1);
+        }
+        
+        .transaction-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 15px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
         }
         
         .transaction-item:last-child {
             border-bottom: none;
         }
         
+        .transaction-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex: 1;
+        }
+        
+        .transaction-icon {
+            font-size: 24px;
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 12px;
+            background: linear-gradient(135deg, rgba(102, 126, 234, 0.2), rgba(240, 147, 251, 0.2));
+        }
+        
         .transaction-info {
             flex: 1;
         }
         
-        .transaction-type {
-            font-size: 24px;
-            margin-right: 15px;
-        }
-        
         .transaction-desc {
+            font-size: 14px;
             font-weight: 500;
-            color: #333;
-            margin-bottom: 5px;
+            color: #fff;
+            margin-bottom: 4px;
         }
         
         .transaction-meta {
-            font-size: 12px;
-            color: #999;
+            font-size: 11px;
+            color: #666;
         }
         
         .transaction-amount {
-            font-weight: bold;
-            font-size: 18px;
+            font-size: 16px;
+            font-weight: 700;
+            text-align: right;
         }
         
         .transaction-amount.income {
@@ -195,258 +382,188 @@
             color: #ef4444;
         }
         
-        .goal-section {
-            background: white;
-            padding: 25px;
-            border-radius: 12px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-            margin-bottom: 30px;
-        }
-        
-        .goal-section h3 {
-            margin-bottom: 15px;
-            color: #333;
-        }
-        
-        .goal-text {
-            font-size: 16px;
+        /* Empty State */
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
             color: #666;
-            margin-bottom: 20px;
         }
         
-        .progress-bar {
-            height: 30px;
-            background: #f0f0f0;
-            border-radius: 15px;
-            overflow: hidden;
-            position: relative;
+        .empty-icon {
+            font-size: 48px;
+            margin-bottom: 15px;
+            opacity: 0.5;
         }
         
-        .progress-fill {
-            height: 100%;
-            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-            transition: width 0.3s;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-            font-weight: bold;
-            font-size: 14px;
+        /* Scrollbar */
+        ::-webkit-scrollbar {
+            width: 6px;
         }
         
-        @media (max-width: 768px) {
-            .charts-grid {
-                grid-template-columns: 1fr;
-            }
-            
-            .stats-grid {
-                grid-template-columns: 1fr;
-            }
+        ::-webkit-scrollbar-track {
+            background: #1a1a1a;
+        }
+        
+        ::-webkit-scrollbar-thumb {
+            background: linear-gradient(180deg, #667eea, #f093fb);
+            border-radius: 10px;
         }
     </style>
 </head>
 <body>
-    <div class="header">
-        <div class="header-content">
-            <div class="logo">
-                <span>💎</span>
-                <span>Finora Dashboard</span>
-            </div>
-            <button class="logout-btn" onclick="location.href='/logout'">Выход</button>
-        </div>
+    <!-- Animated Background -->
+    <div class="bg-particles">
+        <div class="particle" style="width: 100px; height: 100px; top: 10%; left: 10%; animation-delay: 0s;"></div>
+        <div class="particle" style="width: 150px; height: 150px; top: 60%; left: 70%; animation-delay: 3s;"></div>
+        <div class="particle" style="width: 80px; height: 80px; top: 80%; left: 20%; animation-delay: 6s;"></div>
     </div>
     
     <div class="container">
-        <div class="welcome">
-            <h1>Привет, {{ user_name }}! 👋</h1>
-            <p>Вот твоя финансовая статистика</p>
+        <!-- Header -->
+        <div class="header">
+            <div class="logo">💎 FINORA</div>
+            <div class="user-name">{{ user_name }}</div>
         </div>
         
+        <!-- Goal Progress Circle -->
         {% if stats.user_info.goal %}
-        <div class="goal-section">
-            <h3>🎯 Твоя финансовая цель</h3>
-            <p class="goal-text">{{ stats.user_info.goal }}</p>
-            {% set progress = ((stats.balance / (stats.user_info.income_amt or 1)) * 100) | int %}
-            {% if progress > 100 %}{% set progress = 100 %}{% endif %}
-            <div class="progress-bar">
-                <div class="progress-fill" style="width: {{ progress }}%">
-                    {{ progress }}%
+        <div class="goal-card">
+            <div class="goal-header">
+                <div class="goal-title">🎯 Твоя цель</div>
+                <div class="goal-text">{{ stats.user_info.goal }}</div>
+            </div>
+            
+            <div class="progress-circle-wrapper">
+                <svg class="progress-ring" width="220" height="220">
+                    <defs>
+                        <linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" style="stop-color:#667eea;stop-opacity:1" />
+                            <stop offset="100%" style="stop-color:#f093fb;stop-opacity:1" />
+                        </linearGradient>
+                    </defs>
+                    <circle class="progress-ring-bg" cx="110" cy="110" r="95"/>
+                    <circle class="progress-ring-fill" cx="110" cy="110" r="95"
+                            id="progressCircle"
+                            stroke-dasharray="597" 
+                            stroke-dashoffset="597"/>
+                </svg>
+                <div class="progress-center">
+                    <div class="progress-percentage" id="progressPercent">0%</div>
+                    <div class="progress-label">Прогресс</div>
                 </div>
             </div>
         </div>
         {% endif %}
         
+        <!-- Balance Card -->
+        <div class="balance-card">
+            <div class="balance-label">💰 Баланс</div>
+            <div class="balance-amount {% if stats.balance < 0 %}negative{% endif %}">
+                {{ "{:,.0f}".format(stats.balance).replace(',', ' ') }}
+            </div>
+            <div style="font-size: 12px; color: #666; margin-top: 5px;">so'm</div>
+        </div>
+        
+        <!-- Stats Grid -->
         <div class="stats-grid">
             <div class="stat-card">
-                <div class="stat-icon">💰</div>
-                <div class="stat-label">Баланс</div>
-                <div class="stat-value {% if stats.balance >= 0 %}positive{% else %}negative{% endif %}">
-                    {{ "{:,.0f}".format(stats.balance).replace(',', ' ') }} so'm
-                </div>
-            </div>
-            
-            <div class="stat-card">
                 <div class="stat-icon">📈</div>
-                <div class="stat-label">Доходы (всего)</div>
-                <div class="stat-value positive">
-                    {{ "{:,.0f}".format(stats.total_income).replace(',', ' ') }} so'm
-                </div>
+                <div class="stat-label">Доходы</div>
+                <div class="stat-value income">{{ "{:,.0f}".format(stats.month_income).replace(',', ' ') }}</div>
             </div>
             
             <div class="stat-card">
                 <div class="stat-icon">📉</div>
-                <div class="stat-label">Расходы (всего)</div>
-                <div class="stat-value negative">
-                    {{ "{:,.0f}".format(stats.total_expense).replace(',', ' ') }} so'm
-                </div>
-            </div>
-            
-            <div class="stat-card">
-                <div class="stat-icon">📅</div>
-                <div class="stat-label">Этот месяц</div>
-                <div class="stat-value {% if stats.month_balance >= 0 %}positive{% else %}negative{% endif %}">
-                    {{ "{:,.0f}".format(stats.month_balance).replace(',', ' ') }} so'm
-                </div>
+                <div class="stat-label">Расходы</div>
+                <div class="stat-value expense">{{ "{:,.0f}".format(stats.month_expense).replace(',', ' ') }}</div>
             </div>
         </div>
         
-        <div class="charts-grid">
-            <div class="chart-card">
-                <h3>📊 Доходы vs Расходы по месяцам</h3>
-                <canvas id="monthlyChart"></canvas>
+        <!-- Categories Bubbles -->
+        {% if stats.categories %}
+        <div class="categories-section">
+            <div class="section-title">
+                <span>🔥</span>
+                <span>Топ расходы</span>
             </div>
-            
-            <div class="chart-card">
-                <h3>🥧 Расходы по категориям</h3>
-                <canvas id="categoryChart"></canvas>
+            <div class="bubbles-container">
+                {% for cat in stats.categories[:6] %}
+                <div class="bubble" style="--i: {{ loop.index }};">
+                    <div class="bubble-label">{{ cat.category }}</div>
+                    <div class="bubble-value">{{ "{:,.0f}".format(cat.total).replace(',', ' ') }}</div>
+                </div>
+                {% endfor %}
             </div>
         </div>
+        {% endif %}
         
+        <!-- Transactions List -->
         <div class="transactions-section">
-            <h3>📋 Последние транзакции</h3>
-            <div class="transaction-list">
-                {% for tx in stats.transactions %}
+            <div class="section-title">
+                <span>📋</span>
+                <span>Последние транзакции</span>
+            </div>
+            
+            {% if stats.transactions %}
+                {% for tx in stats.transactions[:15] %}
                 <div class="transaction-item">
-                    <div style="display: flex; align-items: center; flex: 1;">
-                        <span class="transaction-type">
+                    <div class="transaction-left">
+                        <div class="transaction-icon">
                             {% if tx.type == 'inc' %}📈{% else %}📉{% endif %}
-                        </span>
+                        </div>
                         <div class="transaction-info">
                             <div class="transaction-desc">{{ tx.description or tx.category }}</div>
                             <div class="transaction-meta">
-                                {{ tx.category }} • {{ tx.created_at.strftime('%d.%m.%Y %H:%M') if tx.created_at else '' }}
+                                {{ tx.category }} • {{ tx.created_at.strftime('%d.%m %H:%M') if tx.created_at else '' }}
                             </div>
                         </div>
                     </div>
                     <div class="transaction-amount {% if tx.type == 'inc' %}income{% else %}expense{% endif %}">
-                        {% if tx.type == 'inc' %}+{% else %}-{% endif %}{{ "{:,.0f}".format(tx.amount).replace(',', ' ') }} so'm
+                        {% if tx.type == 'inc' %}+{% else %}-{% endif %}{{ "{:,.0f}".format(tx.amount).replace(',', ' ') }}
                     </div>
                 </div>
                 {% endfor %}
-                
-                {% if not stats.transactions %}
-                <p style="text-align: center; color: #999; padding: 40px 0;">
-                    Пока нет транзакций 📭<br>
-                    Начни записывать свои доходы и расходы в боте!
-                </p>
-                {% endif %}
-            </div>
+            {% else %}
+                <div class="empty-state">
+                    <div class="empty-icon">📭</div>
+                    <div>Пока нет транзакций</div>
+                    <div style="font-size: 12px; margin-top: 10px;">Начни записывать в боте!</div>
+                </div>
+            {% endif %}
         </div>
     </div>
     
     <script>
-        // Данные для графиков
-        const monthlyData = {{ stats.monthly_data | tojson }};
-        const categories = {{ stats.categories | tojson }};
+        // Animate progress circle
+        {% if stats.user_info.goal and stats.user_info.income_amt %}
+        const targetProgress = Math.min({{ ((stats.balance / stats.user_info.income_amt) * 100) | int }}, 150);
+        {% else %}
+        const targetProgress = 0;
+        {% endif %}
         
-        // График доходов и расходов по месяцам
-        const monthlyCtx = document.getElementById('monthlyChart').getContext('2d');
-        const months = Object.keys(monthlyData).sort();
-        const incomeData = months.map(m => monthlyData[m].inc || 0);
-        const expenseData = months.map(m => monthlyData[m].exp || 0);
+        const circle = document.getElementById('progressCircle');
+        const percentText = document.getElementById('progressPercent');
+        const circumference = 2 * Math.PI * 95; // radius = 95
         
-        new Chart(monthlyCtx, {
-            type: 'line',
-            data: {
-                labels: months.map(m => {
-                    const [y, mon] = m.split('-');
-                    return mon + '/' + y.slice(-2);
-                }),
-                datasets: [{
-                    label: 'Доходы',
-                    data: incomeData,
-                    borderColor: '#10b981',
-                    backgroundColor: 'rgba(16, 185, 129, 0.1)',
-                    tension: 0.4,
-                    fill: true
-                }, {
-                    label: 'Расходы',
-                    data: expenseData,
-                    borderColor: '#ef4444',
-                    backgroundColor: 'rgba(239, 68, 68, 0.1)',
-                    tension: 0.4,
-                    fill: true
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: true,
-                plugins: {
-                    legend: {
-                        position: 'bottom'
-                    }
-                },
-                scales: {
-                    y: {
-                        beginAtZero: true,
-                        ticks: {
-                            callback: function(value) {
-                                return value.toLocaleString('ru-RU');
-                            }
-                        }
-                    }
-                }
-            }
-        });
-        
-        // График категорий расходов
-        if (categories.length > 0) {
-            const categoryCtx = document.getElementById('categoryChart').getContext('2d');
-            const categoryLabels = categories.map(c => c.category);
-            const categoryValues = categories.map(c => c.total);
-            
-            new Chart(categoryCtx, {
-                type: 'doughnut',
-                data: {
-                    labels: categoryLabels,
-                    datasets: [{
-                        data: categoryValues,
-                        backgroundColor: [
-                            '#667eea', '#764ba2', '#f093fb', '#4facfe',
-                            '#43e97b', '#fa709a', '#fee140', '#30cfd0',
-                            '#a8edea', '#fed6e3'
-                        ]
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: true,
-                    plugins: {
-                        legend: {
-                            position: 'bottom'
-                        },
-                        tooltip: {
-                            callbacks: {
-                                label: function(context) {
-                                    const value = context.parsed;
-                                    return context.label + ': ' + value.toLocaleString('ru-RU') + " so'm";
-                                }
-                            }
-                        }
-                    }
-                }
-            });
+        function animateProgress(progress) {
+            const offset = circumference - (progress / 100) * circumference;
+            circle.style.strokeDashoffset = offset;
         }
+        
+        // Animate from 0 to target
+        setTimeout(() => {
+            let current = 0;
+            const interval = setInterval(() => {
+                if (current >= targetProgress) {
+                    clearInterval(interval);
+                    return;
+                }
+                current += 2;
+                if (current > targetProgress) current = targetProgress;
+                animateProgress(current);
+                percentText.textContent = current + '%';
+            }, 20);
+        }, 300);
     </script>
 </body>
 </html>
