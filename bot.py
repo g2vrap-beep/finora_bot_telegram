@@ -332,9 +332,11 @@ def init_db():
 
 def get_user(uid: int) -> dict:
     with sqlite3.connect(DB_PATH) as c:
-        c.execute('INSERT OR IGNORE INTO users(user_id) VALUES(?)', (uid,))
-        row = c.execute('SELECT * FROM users WHERE user_id=?', (uid,)).fetchone()
-        cols = [d[0] for d in c.description]
+        cur = c.cursor()
+        cur.execute('INSERT OR IGNORE INTO users(user_id) VALUES(?)', (uid,))
+        cur.execute('SELECT * FROM users WHERE user_id=?', (uid,))
+        row = cur.fetchone()
+        cols = [d[0] for d in cur.description]
     return dict(zip(cols, row)) if row else {}
 
 def set_user(uid: int, **kwargs):
