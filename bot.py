@@ -930,7 +930,6 @@ async def on_text(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def on_photo(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = upd.effective_user.id
     u    = get_user(uid)
-    if not u.get('onboarding_done'): return
     lang = u.get('language', 'ru')
     await ctx.bot.send_chat_action(upd.effective_chat.id, constants.ChatAction.TYPING)
     msg  = await upd.message.reply_text(tx(lang, 'processing'))
@@ -953,7 +952,6 @@ async def on_photo(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def on_voice(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = upd.effective_user.id
     u    = get_user(uid)
-    if not u.get('onboarding_done'): return
     lang = u.get('language', 'ru')
     await ctx.bot.send_chat_action(upd.effective_chat.id, constants.ChatAction.TYPING)
     msg  = await upd.message.reply_text(tx(lang, 'processing'))
