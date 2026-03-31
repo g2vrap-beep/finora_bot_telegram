@@ -13,7 +13,7 @@ import requests
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from openai import OpenAI
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, constants
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, constants, MenuButtonWebApp, BotCommand
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, filters, ContextTypes
@@ -1286,6 +1286,31 @@ async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.warning(f'Reminder failed for {uid}: {e}')
 
+# ──────────────────────── BOT UI SETUP ────────────────────────────
+async def setup_bot_ui(app: Application):
+    """Setup bot commands and menu button"""
+    dashboard_url = os.getenv('DASHBOARD_URL', 'https://finora-bot.up.railway.app')
+    
+    # Set bot commands (подсказки команд)
+    commands = [
+        BotCommand('start', '🚀 Начать / Перезапустить'),
+        BotCommand('stats', '📊 Статистика'),
+        BotCommand('history', '📋 История транзакций'),
+        BotCommand('advice', '🤖 AI-совет по финансам'),
+        BotCommand('rate', '💱 Курс валют'),
+        BotCommand('settings', '⚙️ Настройки'),
+        BotCommand('help', '❓ Помощь'),
+    ]
+    await app.bot.set_my_commands(commands, language_code='ru')
+    await app.bot.set_my_commands(commands, language_code='uz')
+    
+    # Set menu button (кнопка дашборда рядом с полем ввода)
+    from telegram import WebAppInfo
+    menu_button = MenuButtonWebApp(text='📊 Dashboard', web_app=WebAppInfo(url=dashboard_url))
+    await app.bot.set_chat_menu_button(menu_button=menu_button)
+    
+    logger.info('✅ Bot UI configured: commands + menu button')
+
 # ────────────────────────── MAIN ──────────────────────────────────
 def main():
     init_db()
@@ -1316,6 +1341,12 @@ def main():
 
     # Daily reminder — runs every minute, checks time
     app.job_queue.run_repeating(send_reminders, interval=60, first=10)
+
+    # Setup bot UI (commands + menu button)
+    async def post_init(application: Application):
+        await setup_bot_ui(application)
+    
+    app.post_init = post_init
 
     logger.info('🚀 Finora Bot is running!')
     app.run_polling(drop_pending_updates=True)
