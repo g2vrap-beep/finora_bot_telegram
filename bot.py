@@ -24,7 +24,8 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN      = os.getenv('BOT_TOKEN', '')
 OPENROUTER_KEY = os.getenv('OPENROUTER_KEY', '')
-OPENAI_KEY     = os.getenv('OPENAI_KEY', '')   # for Whisper voice transcription
+OPENAI_KEY     = os.getenv('OPENAI_KEY', '')   # for Whisper voice transcription (optional)
+GROQ_KEY       = os.getenv('GROQ_KEY', '')     # for Groq Whisper — free! (preferred)
 DB_PATH        = os.getenv('DB_PATH', '/data/finora.db')
 OR_MODEL       = os.getenv('OR_MODEL', 'anthropic/claude-sonnet-4-5')
 TZ             = ZoneInfo('Asia/Tashkent')
@@ -558,32 +559,48 @@ async def ai_chat(uid: int, lang: str, text: str) -> str:
     except:
         return '❌ Ошибка.' if lang == 'ru' else '❌ Xatolik.'
 
-# ────────────────────────── VOICE (OpenAI Whisper) ────────────────
+# ────────────────────────── VOICE (Groq Whisper — free!) ──────────
 async def transcribe(ogg_path: str, lang: str) -> str | None:
-    """Transcribe .ogg voice via OpenAI Whisper API or fallback via raw HTTP."""
-    # Prefer direct OpenAI Whisper if OPENAI_KEY is set
-    try:
-        key = OPENAI_KEY or OPENROUTER_KEY
-        if not key:
-            return None
-        # Use raw requests to avoid any openai client base_url override
-        with open(ogg_path, 'rb') as f:
-            ogg_bytes = f.read()
-        hint = 'ru' if lang == 'ru' else 'uz'
-        resp = requests.post(
-            'https://api.openai.com/v1/audio/transcriptions',
-            headers={'Authorization': f'Bearer {OPENAI_KEY}'},
-            files={'file': ('voice.ogg', ogg_bytes, 'audio/ogg')},
-            data={'model': 'whisper-1', 'language': hint},
-            timeout=30
-        )
-        if resp.status_code == 200:
-            return resp.json().get('text', '').strip() or None
-        logger.warning(f'Whisper API error: {resp.status_code} {resp.text[:200]}')
-        return None
-    except Exception as e:
-        logger.warning(f'transcribe error: {e}')
-        return None
+    """Transcribe .ogg voice: tries Groq first (free), then OpenAI."""
+    with open(ogg_path, 'rb') as f:
+        ogg_bytes = f.read()
+    hint = 'ru' if lang == 'ru' else 'uz'
+
+    # 1️⃣ Try Groq (free, fast — whisper-large-v3)
+    if GROQ_KEY:
+        try:
+            resp = requests.post(
+                'https://api.groq.com/openai/v1/audio/transcriptions',
+                headers={'Authorization': f'Bearer {GROQ_KEY}'},
+                files={'file': ('voice.ogg', ogg_bytes, 'audio/ogg; codecs=opus')},
+                data={'model': 'whisper-large-v3', 'language': hint, 'response_format': 'json'},
+                timeout=30
+            )
+            if resp.status_code == 200:
+                text = resp.json().get('text', '').strip()
+                if text:
+                    return text
+            logger.warning(f'Groq Whisper error: {resp.status_code} {resp.text[:200]}')
+        except Exception as e:
+            logger.warning(f'Groq transcribe error: {e}')
+
+    # 2️⃣ Fallback: OpenAI Whisper
+    if OPENAI_KEY:
+        try:
+            resp = requests.post(
+                'https://api.openai.com/v1/audio/transcriptions',
+                headers={'Authorization': f'Bearer {OPENAI_KEY}'},
+                files={'file': ('voice.ogg', ogg_bytes, 'audio/ogg')},
+                data={'model': 'whisper-1', 'language': hint},
+                timeout=30
+            )
+            if resp.status_code == 200:
+                return resp.json().get('text', '').strip() or None
+            logger.warning(f'OpenAI Whisper error: {resp.status_code} {resp.text[:200]}')
+        except Exception as e:
+            logger.warning(f'OpenAI transcribe error: {e}')
+
+    return None
 
 # ────────────────────────── FORMATTERS ────────────────────────────
 def fmt_tx_msg(parsed: dict, lang: str, rates: dict) -> str:
