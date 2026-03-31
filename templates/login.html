@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Finora Dashboard — Вход</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        
+        .login-container {
+            background: white;
+            border-radius: 20px;
+            padding: 60px 40px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            text-align: center;
+            max-width: 400px;
+            width: 100%;
+        }
+        
+        .logo {
+            font-size: 64px;
+            margin-bottom: 20px;
+        }
+        
+        h1 {
+            color: #667eea;
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+        
+        .subtitle {
+            color: #666;
+            margin-bottom: 40px;
+            font-size: 16px;
+        }
+        
+        .features {
+            text-align: left;
+            margin-bottom: 40px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 10px;
+        }
+        
+        .feature {
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            color: #333;
+        }
+        
+        .feature-icon {
+            margin-right: 10px;
+            font-size: 24px;
+        }
+        
+        .telegram-login-button {
+            margin-top: 30px;
+        }
+        
+        .security-note {
+            margin-top: 20px;
+            font-size: 12px;
+            color: #999;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="logo">💎</div>
+        <h1>Finora Dashboard</h1>
+        <p class="subtitle">Твой личный финансовый дашборд</p>
+        
+        <div class="features">
+            <div class="feature">
+                <span class="feature-icon">📊</span>
+                <span>Полная статистика доходов и расходов</span>
+            </div>
+            <div class="feature">
+                <span class="feature-icon">📈</span>
+                <span>Графики и аналитика за месяцы</span>
+            </div>
+            <div class="feature">
+                <span class="feature-icon">🎯</span>
+                <span>Отслеживание финансовых целей</span>
+            </div>
+            <div class="feature">
+                <span class="feature-icon">🔐</span>
+                <span>Безопасный вход через Telegram</span>
+            </div>
+        </div>
+        
+        <div class="telegram-login-button">
+            <script async src="https://telegram.org/js/telegram-widget.js?22" 
+                    data-telegram-login="{{ bot_token.split(':')[0] }}" 
+                    data-size="large" 
+                    data-auth-url="/auth/telegram" 
+                    data-request-access="write">
+            </script>
+        </div>
+        
+        <p class="security-note">
+            🔒 Мы не храним ваш пароль. Авторизация происходит безопасно через Telegram.
+        </p>
+    </div>
+</body>
+</html>

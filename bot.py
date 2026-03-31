@@ -870,6 +870,53 @@ async def cmd_settings(upd: Update, _):
         parse_mode='Markdown'
     )
 
+async def cmd_dashboard(upd: Update, _):
+    uid  = upd.effective_user.id
+    lang = get_lang(uid)
+    dashboard_url = os.getenv('DASHBOARD_URL', 'https://finora-bot.up.railway.app')
+    
+    text = ('💎 *Твой личный дашборд готов!*\n\n'
+            'Открой веб-панель и посмотри:\n'
+            '📊 Подробную статистику\n'
+            '📈 Графики доходов и расходов\n'
+            '🎯 Прогресс к финансовой цели\n'
+            '📋 Все транзакции\n\n'
+            '🔐 Вход через Telegram — безопасно и быстро!')
+    
+    if lang == 'uz':
+        text = ('💎 *Shaxsiy dashboard tayyor!*\n\n'
+                'Veb-panelni oching va ko\'ring:\n'
+                '📊 Batafsil statistika\n'
+                '📈 Daromad va xarajat grafiklari\n'
+                '🎯 Maqsadga erishish jarayoni\n'
+                '📋 Barcha tranzaktsiyalar\n\n'
+                '🔐 Telegram orqali kirish — xavfsiz va tez!')
+    
+    kb = [[InlineKeyboardButton('🌐 Открыть Dashboard' if lang == 'ru' else '🌐 Dashboardni ochish', 
+                                 url=dashboard_url)]]
+    
+    await upd.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode='Markdown'
+    )
+
+async def cmd_reset(upd: Update, _):
+    uid = upd.effective_user.id
+    # Только для админа (твой ID)
+    if uid != 1326256223:
+        await upd.message.reply_text('❌ У тебя нет доступа к этой команде.')
+        return
+    
+    # Сброс онбординга
+    set_user(uid, onboarding_state=STATE_LANG, onboarding_done=0)
+    await upd.message.reply_text(
+        '🔄 *Онбординг сброшен!*\n\n'
+        'Теперь можешь заново пройти регистрацию.\n'
+        'Напиши /start чтобы начать!',
+        parse_mode='Markdown'
+    )
+
 async def on_text(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid     = upd.effective_user.id
     chat_id = upd.effective_chat.id
@@ -992,11 +1039,15 @@ async def on_photo(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(fmt_tx_msg(parsed, lang, rates), parse_mode='Markdown')
 
 async def on_voice(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid  = upd.effective_user.id
-    u    = get_user(uid)
-    lang = u.get('language', 'ru')
-    await ctx.bot.send_chat_action(upd.effective_chat.id, constants.ChatAction.TYPING)
-    msg  = await upd.message.reply_text(tx(lang, 'processing'))
+    uid     = upd.effective_user.id
+    chat_id = upd.effective_chat.id
+    u       = get_user(uid)
+    lang    = u.get('language', 'ru')
+    state   = u.get('onboarding_state', STATE_LANG)
+    done    = u.get('onboarding_done', 0)
+    
+    await ctx.bot.send_chat_action(chat_id, constants.ChatAction.TYPING)
+    msg = await upd.message.reply_text(tx(lang, 'processing'))
 
     vfile = await upd.message.voice.get_file()
     with tempfile.NamedTemporaryFile(suffix='.ogg', delete=False) as f:
@@ -1009,6 +1060,74 @@ async def on_voice(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not transcript:
         await msg.edit_text(tx(lang, 'voice_error')); return
 
+    # ─── ONBOARDING VOICE HANDLING ───
+    if not done:
+        # If still choosing language, prompt to use buttons
+        if state == STATE_LANG:
+            await msg.edit_text(
+                f'🎤 _{transcript}_\n\n'
+                '👆 Сначала выбери язык кнопками выше!\n\n'
+                '👆 Avval yuqoridagi tugmalar bilan tilni tanlang!',
+                parse_mode='Markdown'
+            )
+            return
+        
+        if state == STATE_NAME:
+            set_user(uid, name=transcript, onboarding_state=STATE_INCOME_FREQ)
+            await msg.edit_text(f'🎤 _{transcript}_\n\n✅ Отлично!', parse_mode='Markdown')
+            await send_onboarding_step(chat_id, uid, STATE_INCOME_FREQ, ctx)
+            return
+
+        elif state == STATE_INCOME_AMT:
+            # Extract number from voice using AI
+            parsed = await ai_parse(f"Сумма дохода: {transcript}")
+            if parsed and 'amount' in parsed:
+                amt = parsed['amount']
+                set_user(uid, income_amt=amt, onboarding_state=STATE_CURRENCY)
+                await msg.edit_text(f'🎤 _{transcript}_\n\n✅ Записал: {amt}', parse_mode='Markdown')
+                await send_onboarding_step(chat_id, uid, STATE_CURRENCY, ctx)
+            else:
+                await msg.edit_text(f'🎤 _{transcript}_\n\n❌ Не понял сумму. Попробуй ещё раз или напиши текстом.', parse_mode='Markdown')
+            return
+
+        elif state == STATE_SIDE_AMT:
+            parsed = await ai_parse(f"Сумма дохода: {transcript}")
+            if parsed and 'amount' in parsed:
+                amt = parsed['amount']
+                set_user(uid, side_income=amt, onboarding_state=STATE_GOAL)
+                await msg.edit_text(f'🎤 _{transcript}_\n\n✅ Записал: {amt}', parse_mode='Markdown')
+                await send_onboarding_step(chat_id, uid, STATE_GOAL, ctx)
+            else:
+                await msg.edit_text(f'🎤 _{transcript}_\n\n❌ Не понял сумму. Попробуй ещё раз.', parse_mode='Markdown')
+            return
+
+        elif state == STATE_GOAL_CUSTOM:
+            set_user(uid, goal=transcript, onboarding_state=STATE_NOTIFY_WHY)
+            await msg.edit_text(f'🎤 _{transcript}_\n\n✅ Отлично!', parse_mode='Markdown')
+            await send_onboarding_step(chat_id, uid, STATE_NOTIFY_WHY, ctx)
+            return
+
+        elif state == STATE_NOTIFY_TIME:
+            # Extract time from voice
+            import re
+            time_match = re.search(r'(\d{1,2})[:\s](\d{2})', transcript)
+            if time_match:
+                h, m = int(time_match.group(1)), int(time_match.group(2))
+                if 0 <= h <= 23 and 0 <= m <= 59:
+                    t_str = f"{h:02d}:{m:02d}"
+                    set_user(uid, notify_time=t_str, notify_enabled=1, onboarding_state=STATE_DONE, onboarding_done=1)
+                    name = get_user(uid).get('name', '')
+                    await msg.edit_text(f'🎤 _{transcript}_\n\n' + tx(lang, 'notify_set', time=t_str), parse_mode='Markdown')
+                    await ctx.bot.send_message(chat_id, tx(lang, 'welcome_done', name=name), parse_mode='Markdown')
+                    return
+            await msg.edit_text(f'🎤 _{transcript}_\n\n❌ Не понял время. Скажи например "двадцать один ноль ноль" или напиши 21:00', parse_mode='Markdown')
+            return
+
+        # For other onboarding states, prompt to use buttons
+        await msg.edit_text(f'🎤 _{transcript}_\n\n👆 Пожалуйста, выбери один из вариантов кнопками выше', parse_mode='Markdown')
+        return
+
+    # ─── MAIN BOT LOGIC (after onboarding) ───
     parsed = await ai_parse(transcript)
     if not parsed:
         await msg.edit_text(f'🎤 _{transcript}_\n\n{tx(lang, "parse_error")}', parse_mode='Markdown'); return
@@ -1177,14 +1296,16 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     # Commands
-    app.add_handler(CommandHandler('start',    cmd_start))
-    app.add_handler(CommandHandler('help',     cmd_help))
-    app.add_handler(CommandHandler('stats',    cmd_stats))
-    app.add_handler(CommandHandler('history',  cmd_history))
-    app.add_handler(CommandHandler('rate',     cmd_rate))
-    app.add_handler(CommandHandler('advice',   cmd_advice))
-    app.add_handler(CommandHandler('clear',    cmd_clear))
-    app.add_handler(CommandHandler('settings', cmd_settings))
+    app.add_handler(CommandHandler('start',     cmd_start))
+    app.add_handler(CommandHandler('help',      cmd_help))
+    app.add_handler(CommandHandler('stats',     cmd_stats))
+    app.add_handler(CommandHandler('history',   cmd_history))
+    app.add_handler(CommandHandler('rate',      cmd_rate))
+    app.add_handler(CommandHandler('advice',    cmd_advice))
+    app.add_handler(CommandHandler('clear',     cmd_clear))
+    app.add_handler(CommandHandler('settings',  cmd_settings))
+    app.add_handler(CommandHandler('dashboard', cmd_dashboard))
+    app.add_handler(CommandHandler('reset',     cmd_reset))
 
     # Message handlers
     app.add_handler(CallbackQueryHandler(on_callback))
