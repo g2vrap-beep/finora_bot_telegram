@@ -487,10 +487,11 @@ def build_advisor_system(user: dict, lang: str) -> str:
     freq     = user.get('income_freq', '')
 
     if lang == 'uz':
+        goal_uz = goal if goal else "yo'q"
         return (f"Siz Finora — {name} ning shaxsiy moliyaviy do'stisiz. "
                 f"Uning daromadi: {income} {cur} ({freq})" +
                 (f", qo'shimcha: {side} {cur}" if side else '') +
-                f". Maqsadi: {goal or 'yo\\'q'}. "
+                f". Maqsadi: {goal_uz}. "
                 f"O'zbek tilida gapiring. Qisqa, amaliy, do'stona. "
                 f"Emoji ishlating. O'zbekistondagi real moliyaviy vositalarni (Kapitalbank, Hamkorbank, UZSE, oltin) maslahat bering.")
     else:
