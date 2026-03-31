@@ -17,18 +17,14 @@ from telegram.ext import (
     CallbackQueryHandler, filters, ContextTypes
 )
 
-try:
-    import speech_recognition as sr
-    from pydub import AudioSegment
-    VOICE_OK = True
-except Exception:
-    VOICE_OK = False
+VOICE_OK = True  # always True — using Whisper API
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN      = os.getenv('BOT_TOKEN', '')
 OPENROUTER_KEY = os.getenv('OPENROUTER_KEY', '')
+OPENAI_KEY     = os.getenv('OPENAI_KEY', '')   # for Whisper voice transcription
 DB_PATH        = os.getenv('DB_PATH', '/data/finora.db')
 OR_MODEL       = os.getenv('OR_MODEL', 'anthropic/claude-sonnet-4-5')
 TZ             = ZoneInfo('Asia/Tashkent')
@@ -562,20 +558,31 @@ async def ai_chat(uid: int, lang: str, text: str) -> str:
     except:
         return '❌ Ошибка.' if lang == 'ru' else '❌ Xatolik.'
 
-# ────────────────────────── VOICE ─────────────────────────────────
+# ────────────────────────── VOICE (OpenAI Whisper) ────────────────
 async def transcribe(ogg_path: str, lang: str) -> str | None:
-    if not VOICE_OK:
-        return None
+    """Transcribe .ogg voice via OpenAI Whisper API or fallback via raw HTTP."""
+    # Prefer direct OpenAI Whisper if OPENAI_KEY is set
     try:
-        wav = ogg_path.replace('.ogg', '.wav')
-        AudioSegment.from_ogg(ogg_path).export(wav, format='wav')
-        recognizer = sr.Recognizer()
-        with sr.AudioFile(wav) as src:
-            audio = recognizer.record(src)
-        Path(wav).unlink(missing_ok=True)
-        lang_code = 'ru-RU' if lang == 'ru' else 'uz-UZ'
-        return recognizer.recognize_google(audio, language=lang_code)
-    except:
+        key = OPENAI_KEY or OPENROUTER_KEY
+        if not key:
+            return None
+        # Use raw requests to avoid any openai client base_url override
+        with open(ogg_path, 'rb') as f:
+            ogg_bytes = f.read()
+        hint = 'ru' if lang == 'ru' else 'uz'
+        resp = requests.post(
+            'https://api.openai.com/v1/audio/transcriptions',
+            headers={'Authorization': f'Bearer {OPENAI_KEY}'},
+            files={'file': ('voice.ogg', ogg_bytes, 'audio/ogg')},
+            data={'model': 'whisper-1', 'language': hint},
+            timeout=30
+        )
+        if resp.status_code == 200:
+            return resp.json().get('text', '').strip() or None
+        logger.warning(f'Whisper API error: {resp.status_code} {resp.text[:200]}')
+        return None
+    except Exception as e:
+        logger.warning(f'transcribe error: {e}')
         return None
 
 # ────────────────────────── FORMATTERS ────────────────────────────
