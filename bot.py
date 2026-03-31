@@ -1291,6 +1291,10 @@ async def setup_bot_ui(app: Application):
     """Setup bot commands and menu button"""
     dashboard_url = os.getenv('DASHBOARD_URL', 'https://finora-bot.up.railway.app')
     
+    # Ensure URL starts with https://
+    if not dashboard_url.startswith('http'):
+        dashboard_url = f'https://{dashboard_url}'
+    
     # Set bot commands (подсказки команд)
     commands = [
         BotCommand('start', '🚀 Начать / Перезапустить'),
@@ -1306,10 +1310,13 @@ async def setup_bot_ui(app: Application):
     
     # Set menu button (кнопка дашборда рядом с полем ввода)
     from telegram import WebAppInfo
-    menu_button = MenuButtonWebApp(text='📊 Dashboard', web_app=WebAppInfo(url=dashboard_url))
-    await app.bot.set_chat_menu_button(menu_button=menu_button)
-    
-    logger.info('✅ Bot UI configured: commands + menu button')
+    try:
+        menu_button = MenuButtonWebApp(text='📊 Dashboard', web_app=WebAppInfo(url=dashboard_url))
+        await app.bot.set_chat_menu_button(menu_button=menu_button)
+        logger.info(f'✅ Bot UI configured: commands + menu button ({dashboard_url})')
+    except Exception as e:
+        logger.warning(f'Failed to set menu button: {e}')
+        logger.info('✅ Bot UI configured: commands only')
 
 # ────────────────────────── MAIN ──────────────────────────────────
 def main():
