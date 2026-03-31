@@ -876,24 +876,25 @@ async def cmd_dashboard(upd: Update, _):
     dashboard_url = os.getenv('DASHBOARD_URL', 'https://finora-bot.up.railway.app')
     
     text = ('💎 *Твой личный дашборд готов!*\n\n'
-            'Открой веб-панель и посмотри:\n'
-            '📊 Подробную статистику\n'
+            'Нажми кнопку ниже чтобы открыть прямо в Telegram!\n\n'
+            '📊 Подробная статистика\n'
             '📈 Графики доходов и расходов\n'
             '🎯 Прогресс к финансовой цели\n'
-            '📋 Все транзакции\n\n'
-            '🔐 Вход через Telegram — безопасно и быстро!')
+            '📋 Все транзакции')
     
     if lang == 'uz':
         text = ('💎 *Shaxsiy dashboard tayyor!*\n\n'
-                'Veb-panelni oching va ko\'ring:\n'
+                'Telegramda ochish uchun pastdagi tugmani bosing!\n\n'
                 '📊 Batafsil statistika\n'
                 '📈 Daromad va xarajat grafiklari\n'
                 '🎯 Maqsadga erishish jarayoni\n'
-                '📋 Barcha tranzaktsiyalar\n\n'
-                '🔐 Telegram orqali kirish — xavfsiz va tez!')
+                '📋 Barcha tranzaktsiyalar')
     
-    kb = [[InlineKeyboardButton('🌐 Открыть Dashboard' if lang == 'ru' else '🌐 Dashboardni ochish', 
-                                 url=dashboard_url)]]
+    from telegram import WebAppInfo
+    kb = [[InlineKeyboardButton(
+        '📊 Открыть Dashboard' if lang == 'ru' else '📊 Dashboardni ochish',
+        web_app=WebAppInfo(url=dashboard_url)
+    )]]
     
     await upd.message.reply_text(
         text,
