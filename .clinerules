@@ -1,0 +1,241 @@
+# 💎 FINORA BOT — ПОСТОЯННЫЙ КОНТЕКСТ ПРОЕКТА
+
+## ЧТО ТАКОЕ ПРОЕКТ
+Finora — Telegram финансовый бот. Записывает доходы/расходы, даёт AI советы, умный онбординг.
+Весь бот — ОДИН файл `bot.py`. Не создавать лишних файлов.
+
+---
+
+## СТЕК
+- Python 3.11+
+- python-telegram-bot 21.5 (async, job-queue)
+- OpenRouter AI (claude-sonnet-4-5) через OpenAI SDK
+- Groq Whisper (бесплатно) / OpenAI Whisper — распознавание голоса
+- PostgreSQL через psycopg2-binary
+- Flask 3.0.0 — веб-дашборд (работает в background thread)
+- Деплой: Railway
+
+---
+
+## СТРУКТУРА ФАЙЛОВ
+```
+bot.py              — ВЕСЬ бот (основной файл, менять только его)
+dashboard.py        — Flask дашборд (отдельно)
+templates/          — HTML шаблоны дашборда
+requirements.txt    — зависимости
+.env.example        — пример переменных окружения
+IMPROVEMENT_PLAN.md — план улучшений (читать для понимания задач)
+TASK_0X_*.md       — задачи для выполнения (по одной)
+```
+
+---
+
+## ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ (.env)
+```
+BOT_TOKEN=
+OPENROUTER_KEY=
+OPENAI_KEY=            # опционально, для Whisper
+GROQ_KEY=              # бесплатный Whisper (приоритет)
+DATABASE_URL=          # PostgreSQL internal
+DATABASE_PUBLIC_URL=   # PostgreSQL public (приоритет)
+OR_MODEL=anthropic/claude-sonnet-4-5
+FLASK_SECRET_KEY=
+DASHBOARD_URL=         # URL для веб-дашборда
+ADMIN_USER_ID=1326256223
+```
+
+---
+
+## БАЗА ДАННЫХ
+
+### Таблица `users`
+```sql
+user_id BIGINT PRIMARY KEY
+language TEXT             -- 'ru' или 'uz'
+name TEXT
+income_freq TEXT          -- 'каждый день', 'раз в неделю', etc.
+income_amt FLOAT
+income_currency TEXT      -- 'UZS', 'USD', 'RUB'
+side_income FLOAT
+goal TEXT
+notify_time TEXT          -- 'HH:MM' формат
+notify_enabled INTEGER    -- 1 или 0
+onboarding_state TEXT     -- текущий шаг онбординга
+onboarding_done INTEGER   -- 1 когда онбординг завершён
+```
+
+### Таблица `transactions`
+```sql
+id SERIAL PRIMARY KEY
+user_id BIGINT
+type TEXT               -- 'inc' (доход) или 'exp' (расход)
+amount FLOAT
+description TEXT
+category TEXT           -- emoji + название
+items TEXT              -- JSON список товаров
+currency TEXT           -- 'UZS', 'USD', 'RUB'
+created_at TIMESTAMPTZ
+```
+
+---
+
+## ONBOARDING STATES (порядок)
+```
+STATE_LANG        = 'lang'          # выбор языка
+STATE_NAME        = 'name'          # ввод имени
+STATE_INCOME_FREQ = 'income_freq'   # частота дохода (кнопки)
+STATE_INCOME_AMT  = 'income_amt'    # сумма дохода (текст)
+STATE_CURRENCY    = 'currency'      # валюта (кнопки)
+STATE_SIDE_HUSTLE = 'side_hustle'   # есть подработка? (да/нет)
+STATE_SIDE_AMT    = 'side_amt'      # сумма подработки (текст, если да)
+STATE_GOAL        = 'goal'          # финансовая цель (кнопки)
+STATE_GOAL_CUSTOM = 'goal_custom'   # своя цель (текст, если нет готовой)
+STATE_NOTIFY_WHY  = 'notify_why'    # время уведомлений (кнопки)
+STATE_NOTIFY_TIME = 'notify_time'   # своё время (текст, если другое)
+STATE_DONE        = 'done'          # онбординг завершён
+```
+
+---
+
+## КЛЮЧЕВЫЕ ФУНКЦИИ
+
+### База данных
+```python
+get_conn()                          # psycopg2 connection (использовать как context manager)
+get_user(uid: int) -> dict          # получить/создать пользователя
+set_user(uid: int, **kwargs)        # обновить поля пользователя
+get_lang(uid: int) -> str           # 'ru' или 'uz'
+get_state(uid: int) -> str          # текущий onboarding state
+add_tx(uid, type_, amount, desc, cat, cur, items)  # добавить транзакцию
+get_last_tx(uid) -> tuple           # последняя транзакция
+update_tx(tx_id, amount, description)
+delete_last_tx(uid) -> bool
+get_stats(uid) -> dict              # {inc, exp, count, m_inc, m_exp, cats}
+get_history(uid, limit=15) -> list
+get_recent(uid, limit=30) -> list
+clear_data(uid)
+```
+
+### AI
+```python
+_chat(system, user_content, max_tokens) -> str   # СИНХРОННЫЙ вызов AI
+ai_parse(text) -> dict | None       # парсинг транзакции из текста
+ai_parse_photo(img_bytes, mime) -> dict | None
+ai_advice(uid, lang) -> str         # финансовый совет
+ai_chat(uid, lang, text) -> str     # разговор с AI
+build_advisor_system(user, lang) -> str  # system prompt советника
+transcribe(ogg_path, lang) -> str   # голос → текст (async)
+```
+
+### Утилиты
+```python
+tx(uid_or_lang, key, **kwargs) -> str   # перевод из словаря T
+uzs(n: float) -> str                    # форматирование суммы
+fmt_amount(amount, cur, rates) -> str
+fmt_tx_msg(parsed, lang, rates) -> str  # сообщение о записанной транзакции
+send_onboarding_step(chat_id, uid, state, context)  # показать шаг онбординга
+get_rates() -> dict                     # курсы валют
+```
+
+### Handlers
+```python
+cmd_start, cmd_help, cmd_stats, cmd_history
+cmd_rate, cmd_advice, cmd_clear, cmd_settings
+cmd_dashboard, cmd_reset
+on_text(upd, ctx)    # текстовые сообщения
+on_photo(upd, ctx)   # фото чеков
+on_voice(upd, ctx)   # голосовые сообщения
+on_callback(upd, ctx) # нажатия кнопок
+send_reminders(context) # job: ежеминутная проверка времени уведомлений
+```
+
+---
+
+## СЛОВАРЬ ПЕРЕВОДОВ T
+```python
+T = {
+    'ru': { 'key': 'русский текст', ... },
+    'uz': { 'key': 'узбекский текст', ... }
+}
+# Использование:
+tx(lang, 'key', name=name)
+```
+
+---
+
+## ПРАВИЛА КОДА (СТРОГО ОБЯЗАТЕЛЬНО)
+
+### 1. ТОЛЬКО точечные изменения
+**НИКОГДА** не переписывать `bot.py` целиком. Всегда использовать **replace_in_file** для точечных замен конкретных блоков кода.
+
+### 2. Двуязычность везде
+Любой текст для пользователя — на ОБОИХ языках. Паттерн:
+```python
+if lang == 'ru':
+    msg = 'Русский текст'
+else:
+    msg = "O'zbek matni"
+```
+ИЛИ через словарь T (добавлять новые ключи в оба раздела).
+
+### 3. Новые команды → в main()
+```python
+app.add_handler(CommandHandler('newcmd', cmd_newcmd))
+```
+
+### 4. Новые таблицы → в init_db()
+```python
+c.execute('''CREATE TABLE IF NOT EXISTS new_table(...)''')
+```
+
+### 5. Новые states → как константы в начале файла (рядом с STATE_DONE)
+```python
+STATE_NEW = 'new_state'
+```
+
+### 6. parse_mode='Markdown' везде
+Все `send_message`, `reply_text`, `edit_text` — с `parse_mode='Markdown'`.
+Звёздочки для жирного: `*текст*`. Обратные кавычки для кода: `` `текст` ``.
+
+### 7. Async паттерн для AI
+```python
+result = await asyncio.to_thread(_chat, system, user_content, max_tokens)
+```
+
+### 8. DB соединения — как context manager
+```python
+with get_conn() as conn:
+    with conn.cursor() as c:
+        c.execute(...)
+    conn.commit()
+```
+
+### 9. Admin ID
+```python
+admin_id = int(os.getenv('ADMIN_USER_ID', '1326256223'))
+```
+
+### 10. Timezone
+```python
+datetime.now(TZ)  # TZ = ZoneInfo('Asia/Tashkent')
+```
+
+---
+
+## КАТЕГОРИИ ТРАНЗАКЦИЙ
+```
+🍔 Еда, 🚗 Транспорт, 🏠 Жильё, 💊 Здоровье, 👗 Одежда,
+🎮 Развлечения, 📱 Связь, 🛒 Магазин, 💡 Коммуналка, 📚 Образование,
+⛽ Бензин, 💼 Бизнес, 🎁 Подарок, 💰 Зарплата, 🤝 Фриланс,
+📈 Инвестиции, ❓ Другое
+```
+
+---
+
+## ВАЖНЫЕ ДЕТАЛИ
+- Бот работает ТОЛЬКО с русским и узбекским языком
+- Пользователи из Узбекистана — рекомендовать узбекские финансовые инструменты
+  (Kapitalbank, Hamkorbank, UZSE, золото, недвижимость)
+- Основная валюта UZS (узбекский сум), форматировать через `uzs(n)`
+- Голос: сначала Groq (бесплатно), потом OpenAI Whisper (платно, fallback)
+- Все ошибки логировать через `logger.error()` / `logger.warning()`
