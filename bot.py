@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 💎 Finora — Твой личный финансовый друг
-Telegram bot: учёт финансов + AI советы + умный онбординг + уведомления
+Telegram bot: учёт финансов + AI советы + умный онбординг + уведомления + Flask dashboard
 """
 
 import os, json, logging, tempfile, base64, asyncio, threading, hashlib, hmac
 from datetime import datetime, time as dtime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from urllib.parse import parse_qsl
 
 import requests
 import psycopg2
@@ -33,6 +34,7 @@ DATABASE_URL        = os.getenv('DATABASE_URL', '')         # PostgreSQL interna
 DATABASE_PUBLIC_URL = os.getenv('DATABASE_PUBLIC_URL', '')  # PostgreSQL public URL (preferred)
 OR_MODEL       = os.getenv('OR_MODEL', 'anthropic/claude-sonnet-4-5')
 TZ             = ZoneInfo('Asia/Tashkent')
+ADMIN_ID       = int(os.getenv('ADMIN_USER_ID', '1326256223'))
 
 client = OpenAI(
     api_key=OPENROUTER_KEY,
@@ -60,12 +62,20 @@ STATE_DONE        = 'done'
 STATE_BUG_REPORT = 'bug_report'
 
 # ─── DEBT STATES ───
-STATE_DEBT_COUNT    = 'debt_count'    # Сколько кредитов?
-STATE_DEBT_BANK     = 'debt_bank'     # Название банка
-STATE_DEBT_AMT      = 'debt_amt'      # Сумма долга
-STATE_DEBT_RATE     = 'debt_rate'     # Процентная ставка
-STATE_DEBT_MONTHLY  = 'debt_monthly'  # Ежемесячный платёж
-STATE_DEBT_DEADLINE = 'debt_deadline' # Срок погашения
+STATE_DEBT_COUNT    = 'debt_count'
+STATE_DEBT_BANK     = 'debt_bank'
+STATE_DEBT_AMT      = 'debt_amt'
+STATE_DEBT_RATE     = 'debt_rate'
+STATE_DEBT_MONTHLY  = 'debt_monthly'
+STATE_DEBT_DEADLINE = 'debt_deadline'
+
+# States that accept text input (voice should be routed here too)
+ONBOARDING_TEXT_STATES = {
+    STATE_NAME, STATE_INCOME_AMT, STATE_SIDE_AMT, STATE_GOAL_CUSTOM,
+    STATE_NOTIFY_TIME, STATE_DEBT_COUNT, STATE_DEBT_BANK, STATE_DEBT_AMT,
+    STATE_DEBT_RATE, STATE_DEBT_MONTHLY, STATE_DEBT_DEADLINE,
+    'set_name', 'set_goal', 'set_notify_time', 'debt_payment'
+}
 
 # Карта навигации: текущий state → предыдущий state
 ONBOARDING_BACK_MAP = {
@@ -85,15 +95,11 @@ ONBOARDING_BACK_MAP = {
 }
 
 def get_prev_state(uid: int, current_state: str, user_data: dict) -> str | None:
-    """Получить предыдущий state с учётом динамической логики."""
     u = get_user(uid)
-
     if current_state == STATE_GOAL:
         return STATE_SIDE_AMT if u.get('side_income', 0) > 0 else STATE_SIDE_HUSTLE
-
     if current_state == STATE_NOTIFY_WHY:
         return STATE_GOAL_CUSTOM if u.get('goal', '') else STATE_GOAL
-
     return ONBOARDING_BACK_MAP.get(current_state)
 
 # ────────────────────────── TRANSLATIONS ──────────────────────────
@@ -350,16 +356,13 @@ def tx(uid_or_lang, key: str, **kwargs) -> str:
 
 # ────────────────────────── DATABASE (PostgreSQL) ─────────────────
 def _normalize_pg_url(url: str) -> str:
-    """Normalize postgres:// → postgresql:// for psycopg2."""
     if url.startswith('postgres://'):
         return 'postgresql://' + url[len('postgres://'):]
     return url
 
 def get_conn():
-    # 1️⃣ Prefer public URL (works from Docker, no private networking issues)
     if DATABASE_PUBLIC_URL:
         return psycopg2.connect(_normalize_pg_url(DATABASE_PUBLIC_URL))
-    # 2️⃣ Try internal URL
     if DATABASE_URL:
         return psycopg2.connect(_normalize_pg_url(DATABASE_URL))
     raise ValueError('Set DATABASE_PUBLIC_URL or DATABASE_URL in Railway Variables.')
@@ -386,8 +389,21 @@ def init_db():
                 notify_time TEXT DEFAULT '21:00',
                 notify_enabled INTEGER DEFAULT 1,
                 onboarding_state TEXT DEFAULT 'lang',
-                onboarding_done INTEGER DEFAULT 0
+                onboarding_done INTEGER DEFAULT 0,
+                debt_target INTEGER DEFAULT 0,
+                debt_current INTEGER DEFAULT 0,
+                debt_temp_json TEXT DEFAULT '{}'
             )''')
+            # Add columns for existing tables (safe migration)
+            for col, definition in [
+                ('debt_target',   'INTEGER DEFAULT 0'),
+                ('debt_current',  'INTEGER DEFAULT 0'),
+                ('debt_temp_json','TEXT DEFAULT \'{}\''),
+            ]:
+                try:
+                    c.execute(f'ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} {definition}')
+                except Exception:
+                    pass
             c.execute('''CREATE TABLE IF NOT EXISTS bug_reports(
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT,
@@ -432,6 +448,28 @@ def get_lang(uid: int) -> str:
 
 def get_state(uid: int) -> str:
     return get_user(uid).get('onboarding_state', STATE_LANG)
+
+# ─── DEBT STATE HELPERS (DB-based, survives restarts) ───
+def get_debt_state(uid: int) -> dict:
+    u = get_user(uid)
+    temp_raw = u.get('debt_temp_json', '{}') or '{}'
+    try:
+        temp = json.loads(temp_raw)
+    except Exception:
+        temp = {}
+    return {
+        'target':  u.get('debt_target', 0) or 0,
+        'current': u.get('debt_current', 0) or 0,
+        'temp':    temp,
+    }
+
+def set_debt_state(uid: int, target=None, current=None, temp=None):
+    kwargs = {}
+    if target  is not None: kwargs['debt_target']   = target
+    if current is not None: kwargs['debt_current']  = current
+    if temp    is not None: kwargs['debt_temp_json'] = json.dumps(temp, ensure_ascii=False)
+    if kwargs:
+        set_user(uid, **kwargs)
 
 def add_tx(uid: int, type_: str, amount: float, desc: str, cat: str,
            cur: str = 'UZS', items: str = ''):
@@ -523,6 +561,32 @@ def clear_data(uid: int):
             c.execute('DELETE FROM transactions WHERE user_id=%s', (uid,))
         conn.commit()
 
+def full_reset_user(uid: int):
+    """Полный сброс пользователя: онбординг + транзакции + долги."""
+    with get_conn() as conn:
+        with conn.cursor() as c:
+            c.execute('DELETE FROM transactions WHERE user_id=%s', (uid,))
+            c.execute('DELETE FROM debts WHERE user_id=%s', (uid,))
+            c.execute('''UPDATE users SET
+                onboarding_state='lang', onboarding_done=0,
+                name='', income_freq='', income_amt=0, income_currency='UZS',
+                side_income=0, goal='', notify_time='21:00', notify_enabled=1,
+                debt_target=0, debt_current=0, debt_temp_json='{}'
+                WHERE user_id=%s''', (uid,))
+        conn.commit()
+
+def reset_onboarding_only(uid: int):
+    """Сброс только онбординга — транзакции сохраняются."""
+    with get_conn() as conn:
+        with conn.cursor() as c:
+            c.execute('''UPDATE users SET
+                onboarding_state='lang', onboarding_done=0,
+                name='', income_freq='', income_amt=0, income_currency='UZS',
+                side_income=0, goal='', notify_time='21:00', notify_enabled=1,
+                debt_target=0, debt_current=0, debt_temp_json='{}'
+                WHERE user_id=%s''', (uid,))
+        conn.commit()
+
 def get_all_users_with_notify():
     with get_conn() as conn:
         with conn.cursor() as c:
@@ -531,10 +595,18 @@ def get_all_users_with_notify():
             )
             return c.fetchall()
 
+def get_all_users_list(limit=50):
+    """Получить список пользователей для admin reset."""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as c:
+            c.execute(
+                'SELECT user_id, name, language, onboarding_done FROM users ORDER BY user_id DESC LIMIT %s',
+                (limit,)
+            )
+            return [dict(r) for r in c.fetchall()]
+
 # ────────────────────────── CURRENCY ──────────────────────────────
 def get_rates() -> dict:
-    """Получить курсы с dollaruz.net (реальные рыночные). Fallback: CBU."""
-    # 1️⃣ Попытка получить реальные курсы с dollaruz.net
     try:
         resp = requests.get(
             'https://dollaruz.net/api/currency',
@@ -561,7 +633,6 @@ def get_rates() -> dict:
     except Exception as e:
         logger.warning(f'dollaruz.net error: {e}')
 
-    # 2️⃣ Fallback: официальный курс ЦБ
     try:
         data = requests.get('https://cbu.uz/oz/arkhiv-kursov-valyut/json/', timeout=8).json()
         return {
@@ -674,7 +745,6 @@ Examples:
 If unclear or no name found, return: {"name": null}"""
 
 async def ai_extract_name(text: str) -> str | None:
-    """Извлечь имя из произвольного текста через AI."""
     try:
         raw = await asyncio.to_thread(_chat, _NAME_EXTRACT_SYS, text, 100)
         raw = raw.replace('```json', '').replace('```', '').strip()
@@ -682,7 +752,6 @@ async def ai_extract_name(text: str) -> str | None:
         return data.get('name')
     except Exception as e:
         logger.warning(f'Name extraction failed: {e}')
-        # Fallback: первое слово с большой буквы
         words = text.strip().split()
         return words[0].capitalize() if words else None
 
@@ -711,7 +780,6 @@ async def ai_advice(uid: int, lang: str) -> str:
     user  = get_user(uid)
     rows  = get_recent(uid)
     stats = get_stats(uid)
-    rates = await asyncio.to_thread(get_rates)
 
     prompt = (f"Данные пользователя:\n"
               f"Доходы всего: {uzs(stats['inc'])}\n"
@@ -729,7 +797,6 @@ async def ai_advice(uid: int, lang: str) -> str:
         return '❌ Ошибка.' if lang == 'ru' else '❌ Xatolik.'
 
 async def ai_chat(uid: int, lang: str, text: str, context: ContextTypes.DEFAULT_TYPE = None) -> str:
-    """Дружеский разговор с AI с сохранением истории диалога."""
     user  = get_user(uid)
     stats = get_stats(uid)
 
@@ -740,14 +807,12 @@ async def ai_chat(uid: int, lang: str, text: str, context: ContextTypes.DEFAULT_
     )
     sys_prompt = build_advisor_system(user, lang) + f"\n\nТекущая финансовая ситуация: {fin_ctx}"
 
-    # История диалога из context.user_data
     chat_history = []
     if context is not None:
         chat_history = context.user_data.get('chat_history', [])
 
-    # Построить messages
     messages = [{'role': 'system', 'content': sys_prompt}]
-    for h in chat_history[-10:]:   # последние 10 сообщений
+    for h in chat_history[-10:]:
         messages.append(h)
     messages.append({'role': 'user', 'content': text})
 
@@ -759,11 +824,9 @@ async def ai_chat(uid: int, lang: str, text: str, context: ContextTypes.DEFAULT_
         )
         reply = response.choices[0].message.content.strip().replace('**', '*')
 
-        # Сохранить в историю
         if context is not None:
             chat_history.append({'role': 'user',      'content': text})
             chat_history.append({'role': 'assistant', 'content': reply})
-            # Ограничить до 20 сообщений (10 пар)
             if len(chat_history) > 20:
                 chat_history = chat_history[-20:]
             context.user_data['chat_history'] = chat_history
@@ -773,14 +836,12 @@ async def ai_chat(uid: int, lang: str, text: str, context: ContextTypes.DEFAULT_
         logger.error(f'AI chat error: {e}')
         return '❌ Извини, что-то пошло не так. Попробуй ещё раз!' if lang == 'ru' else '❌ Kechirasiz, xatolik. Qayta urinib ko\'ring!'
 
-# ────────────────────────── VOICE (Groq Whisper — free!) ──────────
+# ────────────────────────── VOICE (Groq Whisper) ──────────────────
 def _transcribe_sync(ogg_path: str, lang: str) -> str | None:
-    """Sync transcribe — runs in thread pool to avoid blocking event loop."""
     with open(ogg_path, 'rb') as f:
         ogg_bytes = f.read()
     hint = 'ru' if lang == 'ru' else 'uz'
 
-    # 1️⃣ Try Groq (free, fast — whisper-large-v3)
     if GROQ_KEY:
         try:
             resp = requests.post(
@@ -798,7 +859,6 @@ def _transcribe_sync(ogg_path: str, lang: str) -> str | None:
         except Exception as e:
             logger.warning(f'Groq transcribe error: {e}')
 
-    # 2️⃣ Fallback: OpenAI Whisper
     if OPENAI_KEY:
         try:
             resp = requests.post(
@@ -842,7 +902,6 @@ MOTIVATIONS = {
 }
 
 def maybe_motivate(lang: str) -> str:
-    """Вернуть случайную мотивацию с вероятностью 10%, или пустую строку."""
     if _random.random() < 0.10:
         return _random.choice(MOTIVATIONS.get(lang, MOTIVATIONS['ru']))
     return ''
@@ -983,6 +1042,53 @@ async def send_onboarding_step(chat_id: int, uid: int, state: str, context):
             reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
         )
 
+    elif state == STATE_DEBT_BANK:
+        ds = get_debt_state(uid)
+        progress = f" ({ds['current'] + 1}/{ds['target']})" if ds['target'] > 1 else ''
+        kb = [[back_btn]]
+        await context.bot.send_message(
+            chat_id,
+            f"🏦 *Кредит{progress}*\n\nНазвание банка или кредитора?" if lang == 'ru'
+            else f"🏦 *Kredit{progress}*\n\nBank yoki kreditor nomi?",
+            reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
+        )
+
+    elif state == STATE_DEBT_AMT:
+        kb = [[back_btn]]
+        await context.bot.send_message(
+            chat_id,
+            '💵 Сколько ты должен? Напиши сумму долга:' if lang == 'ru'
+            else "💵 Qancha qarzingiz bor? Qarz miqdorini yozing:",
+            reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
+        )
+
+    elif state == STATE_DEBT_RATE:
+        kb = [[back_btn]]
+        await context.bot.send_message(
+            chat_id,
+            '📊 Процентная ставка в год? (например: *24*):' if lang == 'ru'
+            else "📊 Yillik foiz stavkasi? (masalan: *24*):",
+            reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
+        )
+
+    elif state == STATE_DEBT_MONTHLY:
+        kb = [[back_btn]]
+        await context.bot.send_message(
+            chat_id,
+            '📅 Ежемесячный платёж? Напиши сумму:' if lang == 'ru'
+            else "📅 Oylik to'lov? Miqdorni yozing:",
+            reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
+        )
+
+    elif state == STATE_DEBT_DEADLINE:
+        kb = [[back_btn]]
+        await context.bot.send_message(
+            chat_id,
+            '⏳ Срок погашения? (например: *Июнь 2026* или *12 месяцев*):' if lang == 'ru'
+            else "⏳ To'lash muddati? (masalan: *Iyun 2026* yoki *12 oy*):",
+            reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
+        )
+
     elif state == STATE_NOTIFY_TIME:
         kb = [[back_btn]]
         await context.bot.send_message(
@@ -991,14 +1097,12 @@ async def send_onboarding_step(chat_id: int, uid: int, state: str, context):
         )
 
 async def handle_bug_report(upd: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str, is_voice: bool = False):
-    """Обработать и сохранить баг-репорт, уведомить админа."""
     uid      = upd.effective_user.id
     user     = get_user(uid)
     lang     = user.get('language', 'ru')
     name     = user.get('name', 'Пользователь')
     username = upd.effective_user.username or 'no_username'
 
-    # Сохранить в БД
     with get_conn() as conn:
         with conn.cursor() as c:
             c.execute(
@@ -1008,12 +1112,9 @@ async def handle_bug_report(upd: Update, ctx: ContextTypes.DEFAULT_TYPE, text: s
             report_id = c.fetchone()[0]
         conn.commit()
 
-    # Контекст пользователя
     stats = get_stats(uid)
     state = user.get('onboarding_state', 'unknown')
 
-    # Отправить Admin
-    admin_id  = int(os.getenv('ADMIN_USER_ID', '1326256223'))
     admin_msg = (
         f"🐛 *НОВЫЙ БАГ-РЕПОРТ #{report_id}*\n\n"
         f"👤 {name} (@{username})\n"
@@ -1032,17 +1133,15 @@ async def handle_bug_report(upd: Update, ctx: ContextTypes.DEFAULT_TYPE, text: s
     ]]
     try:
         await ctx.bot.send_message(
-            admin_id, admin_msg,
+            ADMIN_ID, admin_msg,
             reply_markup=InlineKeyboardMarkup(kb_admin),
             parse_mode='Markdown'
         )
     except Exception as e:
         logger.error(f'Failed to send bug report to admin: {e}')
 
-    # Сбросить state пользователя
     set_user(uid, onboarding_state=STATE_DONE)
 
-    # Подтверждение пользователю
     if lang == 'ru':
         confirm = (
             f"✅ *Спасибо за репорт!*\n\n"
@@ -1062,7 +1161,6 @@ async def handle_bug_report(upd: Update, ctx: ContextTypes.DEFAULT_TYPE, text: s
     await upd.message.reply_text(confirm, parse_mode='Markdown')
 
 async def generate_debt_strategy(uid: int, lang: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Генерирует AI-стратегию погашения долгов и переходит к следующему шагу онбординга."""
     with get_conn() as conn:
         with conn.cursor() as c:
             c.execute(
@@ -1131,19 +1229,13 @@ async def cmd_bug(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = upd.effective_user.id
     user = get_user(uid)
     lang = user.get('language', 'ru')
-    
-    # Prompt user to describe the bug
     await upd.message.reply_text(
         '🐛 Опишите проблему подробно:' if lang == 'ru' else '🐛 Muammoni batafsil yozing:',
         parse_mode='Markdown'
     )
-    
-    # Set state for bug reporting
     set_user(uid, onboarding_state=STATE_BUG_REPORT)
 
 async def setup_bot_ui(app: Application):
-    """Настройка пользовательского интерфейса бота."""
-    # Регистрация команд
     commands = [
         BotCommand('start', '🚀 Начать'),
         BotCommand('stats', '📊 Статистика'),
@@ -1158,46 +1250,7 @@ async def setup_bot_ui(app: Application):
     ]
     await app.bot.set_my_commands(commands)
 
-def main():
-    """Основная функция запуска бота."""
-    # Инициализация базы данных
-    init_db()
-
-    # Настройка приложения
-    async def post_init(app: Application):
-        await setup_bot_ui(app)
-        # Запустить планировщик уведомлений — каждые 60 секунд
-        app.job_queue.run_repeating(send_daily_notifications, interval=60, first=10)
-
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .post_init(post_init)
-        .build()
-    )
-
-    # Регистрация обработчиков
-    app.add_handler(CommandHandler('start', cmd_start))
-    app.add_handler(CommandHandler('stats', cmd_stats))
-    app.add_handler(CommandHandler('history', cmd_history))
-    app.add_handler(CommandHandler('advice', cmd_advice))
-    app.add_handler(CommandHandler('rate', cmd_rate))
-    app.add_handler(CommandHandler('settings', cmd_settings))
-    app.add_handler(CommandHandler('bug', cmd_bug))
-    app.add_handler(CommandHandler('help', cmd_help))
-    app.add_handler(CommandHandler('debts', cmd_debts))
-    app.add_handler(CommandHandler('clear', cmd_clear))
-
-    # Обработчики сообщений и колбэков
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
-    app.add_handler(MessageHandler(filters.VOICE, on_voice))
-    app.add_handler(CallbackQueryHandler(on_callback))
-
-    # Запуск бота
-    app.run_polling(drop_pending_updates=True)
-
-# ─── DEBT MANAGEMENT CALLBACKS ───
+# ─── CALLBACKS ───────────────────────────────────────────────────
 async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = upd.callback_query
     data = q.data
@@ -1207,10 +1260,7 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ─── DEBT MANAGEMENT ───
     if data == 'debt_add':
-        ctx.user_data['debt_target']  = 1
-        ctx.user_data['debt_current'] = 0
-        ctx.user_data['debt_temp']    = {}
-        ctx.user_data['debt_mode']    = 'add'
+        set_debt_state(uid, target=1, current=0, temp={})
         set_user(uid, onboarding_state=STATE_DEBT_BANK)
         await q.answer('➕ Добавляем кредит...' if lang == 'ru' else "➕ Kredit qo'shilmoqda...")
         try: await q.message.delete()
@@ -1374,8 +1424,8 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
             set_user(uid, onboarding_state=STATE_DEBT_COUNT)
             await ctx.bot.send_message(
                 chat_id,
-                '💳 Сколько у тебя кредитов?\n\nНапиши число (например: *2*):' if lang == 'ru'
-                else "💳 Nechta kreditingiz bor?\n\nRaqam yozing (masalan: *2*):",
+                '💳 Сколько у тебя кредитов?\n\nНапиши число (от 1 до 10):' if lang == 'ru'
+                else "💳 Nechta kreditingiz bor?\n\nRaqam yozing (1 dan 10 gacha):",
                 parse_mode='Markdown'
             )
         else:
@@ -1461,6 +1511,54 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
+    # ─── ADMIN RESET CALLBACKS ───
+    if data.startswith('reset_onb_'):
+        if uid != ADMIN_ID:
+            await q.answer('❌ Нет доступа'); return
+        target_uid = int(data[len('reset_onb_'):])
+        reset_onboarding_only(target_uid)
+        await q.answer('✅ Онбординг сброшен')
+        await q.edit_message_text(
+            f"✅ *Онбординг сброшен*\n\nUser ID: `{target_uid}`\nТранзакции сохранены.",
+            parse_mode='Markdown'
+        )
+        return
+
+    if data.startswith('reset_full_'):
+        if uid != ADMIN_ID:
+            await q.answer('❌ Нет доступа'); return
+        target_uid = int(data[len('reset_full_'):])
+        full_reset_user(target_uid)
+        await q.answer('✅ Полный сброс выполнен')
+        await q.edit_message_text(
+            f"✅ *Полный сброс выполнен*\n\nUser ID: `{target_uid}`\nВсё удалено.",
+            parse_mode='Markdown'
+        )
+        return
+
+    if data.startswith('reset_select_'):
+        if uid != ADMIN_ID:
+            await q.answer('❌ Нет доступа'); return
+        target_uid = int(data[len('reset_select_'):])
+        kb = [
+            [InlineKeyboardButton('🔄 Сбросить онбординг', callback_data=f'reset_onb_{target_uid}')],
+            [InlineKeyboardButton('💥 Полный сброс (всё)', callback_data=f'reset_full_{target_uid}')],
+            [InlineKeyboardButton('← Отмена', callback_data='reset_cancel')],
+        ]
+        await q.edit_message_text(
+            f"⚙️ *Сброс пользователя `{target_uid}`*\n\nВыберите тип сброса:",
+            reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
+        )
+        return
+
+    if data == 'reset_cancel':
+        if uid != ADMIN_ID:
+            await q.answer('❌ Нет доступа'); return
+        await q.answer('Отменено')
+        try: await q.message.delete()
+        except: pass
+        return
+
     # ─── SETTINGS ───
     if data == 'set_notify':
         set_user(uid, onboarding_state='set_notify_time')
@@ -1507,31 +1605,47 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await q.answer()
 
-# ─── DEBT PAYMENT HANDLING ───
+# ────────────────────────── TEXT HANDLER ──────────────────────────
 async def on_text(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = upd.message.text.strip()
     uid = upd.effective_user.id
     chat_id = upd.effective_chat.id
     lang = get_lang(uid)
     state = get_state(uid)
+    await _process_text_input(uid, chat_id, text, lang, state, upd, ctx)
+
+async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
+                               state: str, upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Общий обработчик текстового ввода — используется и для текста, и для голоса."""
 
     # ─── DEBT MANAGEMENT ───
     if state == STATE_DEBT_COUNT:
         try:
             count = int(text.strip())
-            if count <= 0: raise ValueError
+            if count <= 0: raise ValueError('zero')
+            if count > 10:
+                await upd.message.reply_text(
+                    '❌ Максимум 10 кредитов. Напиши число от 1 до 10:' if lang == 'ru'
+                    else '❌ Maksimal 10 kredit. 1 dan 10 gacha raqam yozing:',
+                    parse_mode='Markdown'
+                )
+                return
             set_user(uid, onboarding_state=STATE_DEBT_BANK)
-            ctx.user_data['debt_target']  = count
-            ctx.user_data['debt_current'] = 0
-            ctx.user_data['debt_temp']    = {}
+            set_debt_state(uid, target=count, current=0, temp={})
             await upd.message.reply_text('✅ Отлично! Начинаю собирать данные...' if lang == 'ru' else "✅ Zo'r! Ma'lumotlarni to'playapman...")
             await send_onboarding_step(chat_id, uid, STATE_DEBT_BANK, ctx)
-        except:
-            await upd.message.reply_text('❌ Напиши число, например: *3*' if lang == 'ru' else "❌ Raqam yozing, masalan: *3*", parse_mode='Markdown')
+        except ValueError:
+            await upd.message.reply_text(
+                '❌ Напиши число от 1 до 10, например: *3*' if lang == 'ru' else "❌ 1 dan 10 gacha raqam yozing, masalan: *3*",
+                parse_mode='Markdown'
+            )
         return
 
     elif state == STATE_DEBT_BANK:
-        ctx.user_data.setdefault('debt_temp', {})['bank'] = text
+        ds = get_debt_state(uid)
+        temp = ds['temp']
+        temp['bank'] = text
+        set_debt_state(uid, temp=temp)
         set_user(uid, onboarding_state=STATE_DEBT_AMT)
         await send_onboarding_step(chat_id, uid, STATE_DEBT_AMT, ctx)
         return
@@ -1539,7 +1653,10 @@ async def on_text(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif state == STATE_DEBT_AMT:
         try:
             amt = float(text.replace(' ', '').replace(',', '.'))
-            ctx.user_data['debt_temp']['amount'] = amt
+            ds = get_debt_state(uid)
+            temp = ds['temp']
+            temp['amount'] = amt
+            set_debt_state(uid, temp=temp)
             set_user(uid, onboarding_state=STATE_DEBT_RATE)
             await send_onboarding_step(chat_id, uid, STATE_DEBT_RATE, ctx)
         except:
@@ -1549,7 +1666,10 @@ async def on_text(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif state == STATE_DEBT_RATE:
         try:
             rate = float(text.replace('%', '').replace(' ', '').replace(',', '.'))
-            ctx.user_data['debt_temp']['rate'] = rate
+            ds = get_debt_state(uid)
+            temp = ds['temp']
+            temp['rate'] = rate
+            set_debt_state(uid, temp=temp)
             set_user(uid, onboarding_state=STATE_DEBT_MONTHLY)
             await send_onboarding_step(chat_id, uid, STATE_DEBT_MONTHLY, ctx)
         except:
@@ -1559,7 +1679,10 @@ async def on_text(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif state == STATE_DEBT_MONTHLY:
         try:
             monthly = float(text.replace(' ', '').replace(',', '.'))
-            ctx.user_data['debt_temp']['monthly_payment'] = monthly
+            ds = get_debt_state(uid)
+            temp = ds['temp']
+            temp['monthly_payment'] = monthly
+            set_debt_state(uid, temp=temp)
             set_user(uid, onboarding_state=STATE_DEBT_DEADLINE)
             await send_onboarding_step(chat_id, uid, STATE_DEBT_DEADLINE, ctx)
         except:
@@ -1567,21 +1690,21 @@ async def on_text(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     elif state == STATE_DEBT_DEADLINE:
-        ctx.user_data['debt_temp']['deadline'] = text
+        ds = get_debt_state(uid)
+        temp = ds['temp']
+        temp['deadline'] = text
         # Сохранить кредит в БД
-        d = ctx.user_data.get('debt_temp', {})
         with get_conn() as conn:
             with conn.cursor() as c:
                 c.execute(
                     'INSERT INTO debts(user_id, bank, amount, rate, monthly_payment, deadline) VALUES(%s,%s,%s,%s,%s,%s)',
-                    (uid, d.get('bank', '?'), d.get('amount', 0), d.get('rate', 0),
-                     d.get('monthly_payment', 0), d.get('deadline', '?'))
+                    (uid, temp.get('bank', '?'), temp.get('amount', 0), temp.get('rate', 0),
+                     temp.get('monthly_payment', 0), temp.get('deadline', '?'))
                 )
             conn.commit()
-        current = ctx.user_data.get('debt_current', 0) + 1
-        target  = ctx.user_data.get('debt_target', 1)
-        ctx.user_data['debt_current'] = current
-        ctx.user_data['debt_temp']    = {}
+        current = ds['current'] + 1
+        target  = ds['target']
+        set_debt_state(uid, current=current, temp={})
         if current < target:
             set_user(uid, onboarding_state=STATE_DEBT_BANK)
             await upd.message.reply_text(
@@ -1973,6 +2096,56 @@ async def cmd_clear(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_reset(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Admin: сбросить данные пользователя. Только для ADMIN_ID."""
+    uid = upd.effective_user.id
+    if uid != ADMIN_ID:
+        await upd.message.reply_text('❌ Нет доступа')
+        return
+
+    args = ctx.args  # list of arguments after /reset
+    
+    # /reset <user_id> — прямой сброс по ID
+    if args and args[0].isdigit():
+        target_uid = int(args[0])
+        kb = [
+            [InlineKeyboardButton('🔄 Сбросить онбординг', callback_data=f'reset_onb_{target_uid}')],
+            [InlineKeyboardButton('💥 Полный сброс (всё)', callback_data=f'reset_full_{target_uid}')],
+            [InlineKeyboardButton('← Отмена', callback_data='reset_cancel')],
+        ]
+        await upd.message.reply_text(
+            f"⚙️ *Сброс пользователя `{target_uid}`*\n\nВыберите тип сброса:",
+            reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
+        )
+        return
+
+    # /reset — показать список пользователей
+    users = get_all_users_list(limit=30)
+    if not users:
+        await upd.message.reply_text('📭 Нет пользователей')
+        return
+
+    lines = ['👥 *Список пользователей:*\n']
+    kb = []
+    for u in users:
+        u_id   = u['user_id']
+        u_name = u.get('name', '?') or '?'
+        u_done = '✅' if u.get('onboarding_done') else '⏳'
+        u_lang = u.get('language', '?')
+        lines.append(f"{u_done} `{u_id}` — *{u_name}* ({u_lang})")
+        kb.append([InlineKeyboardButton(
+            f"{u_done} {u_name} ({u_id})",
+            callback_data=f'reset_select_{u_id}'
+        )])
+
+    kb.append([InlineKeyboardButton('← Закрыть', callback_data='reset_cancel')])
+    await upd.message.reply_text(
+        '\n'.join(lines),
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode='Markdown'
+    )
+
+
 # ────────────────────────── PHOTO HANDLER ─────────────────────────
 async def on_photo(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = upd.effective_user.id
@@ -2006,7 +2179,7 @@ async def on_photo(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await upd.message.reply_text(reply, parse_mode='Markdown')
 
 
-# ────────────────────────── VOICE HANDLER ─────────────────────────
+# ────────────────────────── VOICE HANDLER (FIXED) ─────────────────
 async def on_voice(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid   = upd.effective_user.id
     lang  = get_lang(uid)
@@ -2031,11 +2204,19 @@ async def on_voice(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await upd.message.reply_text(tx(lang, 'voice_error'), parse_mode='Markdown')
         return
 
-    # Route to bug report if in that state
+    # ─── Route bug reports ───
     if state == STATE_BUG_REPORT:
         await handle_bug_report(upd, ctx, text_result, is_voice=True)
         return
 
+    # ─── Route onboarding/settings text input states ───
+    # (FIX: голос в онбординге теперь работает правильно)
+    if state in ONBOARDING_TEXT_STATES:
+        await upd.message.reply_text(f'🎤 _{text_result}_', parse_mode='Markdown')
+        await _process_text_input(uid, upd.effective_chat.id, text_result, lang, state, upd, ctx)
+        return
+
+    # ─── Regular transaction parsing ───
     wait2  = await upd.message.reply_text(f'🎤 _{text_result}_\n\n{tx(lang, "processing")}', parse_mode='Markdown')
     parsed = await ai_parse(text_result)
     try: await wait2.delete()
@@ -2059,7 +2240,6 @@ async def on_voice(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ────────────────────────── NOTIFICATION SCHEDULER ────────────────
 async def send_daily_notifications(context: ContextTypes.DEFAULT_TYPE):
-    """Рассылка ежедневных напоминаний — запускается каждую минуту."""
     now_str = datetime.now(TZ).strftime('%H:%M')
     try:
         users = get_all_users_with_notify()
@@ -2079,6 +2259,157 @@ async def send_daily_notifications(context: ContextTypes.DEFAULT_TYPE):
             logger.info(f'Sent reminder to {uid}')
         except Exception as e:
             logger.warning(f'Failed to send reminder to {uid}: {e}')
+
+
+# ────────────────────────── FLASK DASHBOARD ───────────────────────
+flask_app = Flask(__name__, template_folder='templates')
+flask_app.secret_key = os.getenv('FLASK_SECRET_KEY', 'finora-dashboard-secret-change-me')
+
+def _verify_telegram_webapp(init_data: str) -> int | None:
+    """Проверка tg.initData от Telegram WebApp. Возвращает user_id или None."""
+    try:
+        parsed = dict(parse_qsl(init_data, keep_blank_values=True))
+        check_hash = parsed.pop('hash', None)
+        if not check_hash:
+            return None
+
+        data_check_arr = [f'{k}={v}' for k, v in sorted(parsed.items())]
+        data_check_string = '\n'.join(data_check_arr)
+
+        # WebApp key = HMAC_SHA256("WebAppData", BOT_TOKEN)
+        secret_key = hmac.new(
+            b'WebAppData',
+            BOT_TOKEN.encode(),
+            hashlib.sha256
+        ).digest()
+        computed = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+
+        if not hmac.compare_digest(computed, check_hash):
+            return None
+
+        # Проверка свежести (5 минут)
+        auth_date = int(parsed.get('auth_date', 0))
+        if datetime.now().timestamp() - auth_date > 300:
+            return None
+
+        user_data = json.loads(parsed.get('user', '{}'))
+        return user_data.get('id')
+    except Exception as e:
+        logger.warning(f'WebApp auth error: {e}')
+        return None
+
+def _get_user_stats_for_dashboard(user_id: int) -> dict:
+    month = datetime.now(TZ).strftime('%Y-%m')
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as c:
+                c.execute('SELECT type, SUM(amount) as total FROM transactions WHERE user_id=%s GROUP BY type', (user_id,))
+                totals = {row['type']: float(row['total']) for row in c.fetchall()}
+
+                c.execute('''SELECT type, SUM(amount) as total FROM transactions
+                    WHERE user_id=%s AND TO_CHAR(created_at AT TIME ZONE 'Asia/Tashkent', 'YYYY-MM')=%s
+                    GROUP BY type''', (user_id, month))
+                month_totals = {row['type']: float(row['total']) for row in c.fetchall()}
+
+                c.execute('''SELECT category, SUM(amount) as total
+                    FROM transactions WHERE user_id=%s AND type='exp'
+                    AND TO_CHAR(created_at AT TIME ZONE 'Asia/Tashkent', 'YYYY-MM')=%s
+                    GROUP BY category ORDER BY total DESC LIMIT 10''', (user_id, month))
+                categories = [dict(row) for row in c.fetchall()]
+
+                c.execute('''SELECT id, type, amount, description, category, currency, created_at
+                    FROM transactions WHERE user_id=%s ORDER BY created_at DESC LIMIT 50''', (user_id,))
+                transactions = [dict(row) for row in c.fetchall()]
+
+                c.execute('SELECT * FROM users WHERE user_id=%s', (user_id,))
+                row = c.fetchone()
+                user_info = dict(row) if row else {}
+    except Exception as e:
+        logger.error(f'Dashboard stats error: {e}')
+        return {}
+
+    return {
+        'total_income':   totals.get('inc', 0),
+        'total_expense':  totals.get('exp', 0),
+        'balance':        totals.get('inc', 0) - totals.get('exp', 0),
+        'month_income':   month_totals.get('inc', 0),
+        'month_expense':  month_totals.get('exp', 0),
+        'month_balance':  month_totals.get('inc', 0) - month_totals.get('exp', 0),
+        'categories':     categories,
+        'transactions':   transactions,
+        'user_info':      user_info,
+    }
+
+@flask_app.route('/')
+def dashboard_index():
+    return render_template('dashboard.html')
+
+@flask_app.route('/api/stats')
+def dashboard_api_stats():
+    """API endpoint — валидирует tg.initData и возвращает статистику."""
+    init_data = request.args.get('initData', '')
+    if not init_data:
+        return jsonify({'error': 'No initData'}), 401
+
+    user_id = _verify_telegram_webapp(init_data)
+    if not user_id:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    stats = _get_user_stats_for_dashboard(user_id)
+
+    # Convert datetime to string for JSON
+    for t in stats.get('transactions', []):
+        if t.get('created_at'):
+            try:
+                t['created_at'] = t['created_at'].astimezone(TZ).strftime('%d.%m %H:%M')
+            except Exception:
+                t['created_at'] = str(t['created_at'])[:16]
+
+    return jsonify(stats)
+
+def _run_flask():
+    """Запуск Flask в отдельном потоке."""
+    port = int(os.getenv('PORT', 5000))
+    logger.info(f'Starting Flask dashboard on port {port}')
+    flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
+# ────────────────────────── MAIN ──────────────────────────────────
+def main():
+    init_db()
+
+    # Запустить Flask в фоновом потоке
+    flask_thread = threading.Thread(target=_run_flask, daemon=True)
+    flask_thread.start()
+
+    async def post_init(app: Application):
+        await setup_bot_ui(app)
+        app.job_queue.run_repeating(send_daily_notifications, interval=60, first=10)
+
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
+
+    app.add_handler(CommandHandler('start',    cmd_start))
+    app.add_handler(CommandHandler('stats',    cmd_stats))
+    app.add_handler(CommandHandler('history',  cmd_history))
+    app.add_handler(CommandHandler('advice',   cmd_advice))
+    app.add_handler(CommandHandler('rate',     cmd_rate))
+    app.add_handler(CommandHandler('settings', cmd_settings))
+    app.add_handler(CommandHandler('bug',      cmd_bug))
+    app.add_handler(CommandHandler('help',     cmd_help))
+    app.add_handler(CommandHandler('debts',    cmd_debts))
+    app.add_handler(CommandHandler('clear',    cmd_clear))
+    app.add_handler(CommandHandler('reset',    cmd_reset))
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
+    app.add_handler(MessageHandler(filters.VOICE, on_voice))
+    app.add_handler(CallbackQueryHandler(on_callback))
+
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == '__main__':
