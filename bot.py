@@ -15,7 +15,7 @@ import requests
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from openai import OpenAI
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, constants, MenuButtonWebApp, BotCommand, WebAppInfo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp, BotCommand, WebAppInfo
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, filters, ContextTypes
@@ -29,16 +29,15 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN      = os.getenv('BOT_TOKEN', '')
 OPENROUTER_KEY = os.getenv('OPENROUTER_KEY', '')
-OPENAI_KEY     = os.getenv('OPENAI_KEY', '')   # for Whisper voice transcription (optional)
-GROQ_KEY       = os.getenv('GROQ_KEY', '')     # for Groq Whisper — free! (preferred)
-DATABASE_URL        = os.getenv('DATABASE_URL', '')         # PostgreSQL internal URL
-DATABASE_PUBLIC_URL = os.getenv('DATABASE_PUBLIC_URL', '')  # PostgreSQL public URL (preferred)
+OPENAI_KEY     = os.getenv('OPENAI_KEY', '')
+GROQ_KEY       = os.getenv('GROQ_KEY', '')
+DATABASE_URL        = os.getenv('DATABASE_URL', '')
+DATABASE_PUBLIC_URL = os.getenv('DATABASE_PUBLIC_URL', '')
 OR_MODEL       = os.getenv('OR_MODEL', 'anthropic/claude-sonnet-4-5')
 TZ             = ZoneInfo('Asia/Tashkent')
 ADMIN_ID       = int(os.getenv('ADMIN_USER_ID', '1326256223'))
 
 # ─── SECURITY CONSTANTS ───────────────────────────────────────────
-# Allowed AI models for OpenRouter (must be before OR_MODEL validation)
 _ALLOWED_MODELS = frozenset({
     'anthropic/claude-sonnet-4-5',
     'anthropic/claude-3-5-sonnet-20241022',
@@ -47,7 +46,6 @@ _ALLOWED_MODELS = frozenset({
     'meta-llama/llama-3-8b-instruct',
 })
 
-# Validate OR_MODEL — fallback to default if invalid
 _OR_MODEL = os.getenv('OR_MODEL', 'anthropic/claude-sonnet-4-5')
 if _OR_MODEL not in _ALLOWED_MODELS:
     logger.warning(f'OR_MODEL "{_OR_MODEL}" not in allowed list, using default')
@@ -64,7 +62,6 @@ client = OpenAI(
     }
 )
 
-# Whitelist of allowed columns for set_user() — prevents SQL injection
 _ALLOWED_USER_COLUMNS = frozenset({
     'language', 'name', 'income_freq', 'income_amt', 'income_currency',
     'side_income', 'goal', 'goal_amount', 'goal_saved',
@@ -72,22 +69,18 @@ _ALLOWED_USER_COLUMNS = frozenset({
     'debt_target', 'debt_current', 'debt_temp_json',
 })
 
-# Rate limiting for AI requests (per user per minute)
-_RATE_LIMIT_WINDOW = 60  # seconds
-_RATE_LIMIT_MAX = 30     # max requests per window
+_RATE_LIMIT_WINDOW = 60
+_RATE_LIMIT_MAX = 30
 _ai_rate_limit: dict[int, list[float]] = defaultdict(list)
 
-# Input length limits
 _MAX_LEN_NAME = 64
 _MAX_LEN_GOAL = 256
 _MAX_LEN_DESC = 500
 _MAX_LEN_BANK = 128
 _MAX_LEN_DEADLINE = 64
+_PENDING_TX_TTL = 600
 
-# TTL for pending transactions (10 minutes)
-_PENDING_TX_TTL = 600  # seconds
-
-# ────────────────────────── ONBOARDING STATES ─────────────────────
+# ─── ONBOARDING STATES ─────────────────────────────────────────────
 STATE_LANG        = 'lang'
 STATE_NAME        = 'name'
 STATE_NAME_CONFIRM = 'name_confirm'
@@ -104,7 +97,6 @@ STATE_NOTIFY_TIME = 'notify_time'
 STATE_DONE        = 'done'
 STATE_BUG_REPORT  = 'bug_report'
 
-# ─── DEBT STATES ───
 STATE_DEBT_COUNT    = 'debt_count'
 STATE_DEBT_BANK     = 'debt_bank'
 STATE_DEBT_AMT      = 'debt_amt'
@@ -112,7 +104,6 @@ STATE_DEBT_RATE     = 'debt_rate'
 STATE_DEBT_MONTHLY  = 'debt_monthly'
 STATE_DEBT_DEADLINE = 'debt_deadline'
 
-# States that accept text input (voice should be routed here too)
 ONBOARDING_TEXT_STATES = {
     STATE_NAME, STATE_INCOME_AMT, STATE_SIDE_AMT, STATE_GOAL_CUSTOM,
     STATE_GOAL_AMOUNT,
@@ -124,7 +115,6 @@ ONBOARDING_TEXT_STATES = {
     'budget_set_amount',
 }
 
-# Карта навигации: текущий state → предыдущий state
 ONBOARDING_BACK_MAP = {
     'name_confirm':  STATE_NAME,
     STATE_INCOME_FREQ: 'name_confirm',
@@ -150,7 +140,7 @@ def get_prev_state(uid: int, current_state: str, user_data: dict) -> str | None:
         return STATE_GOAL_CUSTOM if u.get('goal', '') else STATE_GOAL
     return ONBOARDING_BACK_MAP.get(current_state)
 
-# ────────────────────────── TRANSLATIONS ──────────────────────────
+# ─── TRANSLATIONS ─────────────────────────────────────────────────
 T = {
     'ru': {
         'choose_lang'      : '👋 Привет! Я *Finora* — твой личный финансовый друг 💎\n\nВыбери язык:',
@@ -302,50 +292,71 @@ T = {
         'budget_deleted'   : '🗑 Лимит удалён',
         'advice_40'        : '\n\n⚠️ *Замечаю тенденцию:* на {cat} в этом месяце уже {amount} — это {pct:.0f}% от дохода. Возможно стоит пересмотреть?',
         'advice_60'        : '\n\n🚨 *Внимание!* {cat} съедает {pct:.0f}% твоего дохода в этом месяце! Это {amount}. Хочешь разберём как сократить? 👉 /advice',
+        'debt_payoff_warn': '⚠️ Платёж не покрывает проценты!',
+        'debt_close_success': '🎉🎉🎉 *КРАСАВА!!!*\n\nТы закрыл кредит *{bank}* на {amount}!\n\nЭто ОГРОМНОЕ достижение! 💪💎\n\n_Используй /debts чтобы посмотреть остальные._',
+        'no_access'        : '❌ Нет доступа',
+        'rate_limit'       : '⏳ Слишком много запросов. Подожди минуту.',
+        'ttl_expired'       : '⏰ Данные устарели. Отправьте транзакцию заново.',
+        'debt_hdr'         : '💳 *Кредиты*',
+        'debt_active'      : 'Активных кредитов нет 🎉',
+        'debt_debt_lbl'   : 'Долг',
+        'debt_rate_lbl'   : 'Ставка',
+        'debt_monthly_lbl': 'Платёж/мес',
+        'debt_deadline_lbl': 'Срок',
+        'debt_close_lbl'  : 'Закроешь через',
+        'debt_total_lbl'  : 'Итого',
+        'debt_add_lbl'    : 'Добавить кредит',
+        'debt_pay_lbl'    : 'Внести платёж',
+        'debt_close_lbl2' : 'Закрыть кредит',
+        'top_expenses'    : 'Топ расходов',
+        'goal_no_set'     : 'Цель не установлена. Используй /settings',
+        'saved_lbl'       : 'Накоплено',
+        'error_num'       : '❌ Напиши число',
+        'budget_err'      : '❌ Ошибка. Попробуй ещё раз.',
     },
     'uz': {
-        'choose_lang'      : '👋 Salom! Men *Finora* — sizning shaxsiy moliyaviy do\'stingiz 💎\n\nTilni tanlang:',
+        'choose_lang'      : "👋 Salom! Men *Finora* — sizning shaxsiy moliyaviy do'stingiz 💎\n\nTilni tanlang:",
         'ask_name'         : '✨ Ajoyib! Ismingiz nima? Yozing:',
-        'ask_income_freq'  : ('🎉 Tanishganimdan xursandman, *{name}*!\n\n'
-                              'Aytingchi — daromad qancha vaqt oralig\'ida kelib turadi?'),
+        'ask_income_freq'  : ("🎉 Tanishganimdan xursandman, *{name}*!\n\n"
+                              "Aytingchi — daromad qancha vaqt oralig'ida kelib turadi?"),
         'freq_daily'       : '📅 Har kun',
         'freq_weekly'      : '📆 Haftada bir',
         'freq_monthly'     : '🗓 Oyda bir',
         'freq_irregular'   : '🔀 Tartibsiz',
-        'ask_income_amt'   : '💰 Taxminan qancha ishlanadi? Miqdorni yozing (masalan: *500000*):',
+        'ask_income_amt'   : "💰 Taxminan qancha ishlanadi? Miqdorni yozing (masalan: *500000*):",
         'ask_currency'     : '💱 Qaysi valyutada?',
-        'cur_uzs'          : '🇺🇿 So\'m (UZS)',
+        'cur_uzs'          : "🇺🇿 So'm (UZS)",
         'cur_usd'          : '🇺🇸 Dollar (USD)',
         'cur_rub'          : '🇷🇺 Rubl (RUB)',
-        'ask_side_hustle'  : ('👀 Tushundim!\n\n'
-                              'Asosiy daromaddan tashqari qo\'shimcha ish, biznes yoki '
-                              'boshqa pul manbai bormi?'),
+        'ask_side_hustle'  : ("👀 Tushundim!\n\n"
+                              "Asosiy daromaddan tashqari qo'shimcha ish, biznes yoki "
+                              "boshqa pul manbai bormi?"),
         'yes'              : '✅ Ha',
-        'no'               : '❌ Yo\'q',
-        'ask_side_amt'     : '💼 Qo\'shimcha ish/biznesdan o\'rtacha qancha keladi? (miqdorni yozing):',
-        'ask_goal'         : ('🎯 *{name}*, moliyaviy maqsadingiz nima?\n\n'
-                              'Bu juda muhim — maqsad har bir yozilgan xarajatga ma\'no beradi. '
-                              'Maqsadsiz pul shunchaki ketib qoladi. '
-                              'Maqsad bilan — tejagan har bir so\'m orzuingizga qadam bo\'ladi 🚀'),
-        'goal_save'        : '🏦 Pul to\'plash',
+        'no'               : "❌ Yo'q",
+        'ask_side_amt'     : "💼 Qo'shimcha ish/biznesdan o'rtacha qancha keladi? (miqdorni yozing):",
+        'ask_goal'         : ("🎯 *{name}*, moliyaviy maqsadingiz nima?\n\n"
+                              "Bu juda muhim — maqsad har bir yozilgan xarajatga ma'no beradi. "
+                              "Maqsadsiz pul shunchaki ketib qoladi. "
+                              "Maqsad bilan — tejagan har bir so'm orzuingizga qadam bo'ladi 🚀"),
+        'goal_save'        : "🏦 Pul to'plash",
         'goal_buy'         : '🛒 Biror narsa sotib olish',
         'goal_invest'      : '📈 Investitsiya boshlash',
-        'goal_debt'        : '💳 Qarz/kreditni to\'lash',
+        'goal_debt'        : "💳 Qarz/kreditni to'lash",
         'goal_business'    : '🏪 Biznesni ochish/rivojlantirish',
         'goal_none'        : '🤷 Hozircha yo\'q',
         'ask_goal_custom'  : '✏️ Maqsadingizni yozing (masalan: *Dekabrgacha mashina olish*):',
-        'ask_goal_amount'  : '💰 Qancha to\'plashni xohlaysiz? Summani yozing (yoki o\'tkazib yuboring):',
-        'goal_amount_skip' : '⏭ O\'tkazib yuborish',
-        'no_goal_speech'   : ('Hmm, *{name}*, sizni tushunaman 😊\n\n'
-                              'Lekin bir gap bor — moliyaviy maqsadi bo\'lmaganlar o\'rtacha 40% ko\'proq sarflaydi. '
-                              'Chunki yo\'nalish yo\'q.\n\n'
-                              'Yordam beraymi? Hatto noaniq bo\'lsa ham yozing — '
+        'ask_goal_amount'  : "💰 Qancha to'plashni xohlaysiz? Summani yozing (yoki o'tkazib yuboring):",
+        'goal_amount_skip' : "⏭ O'tkazib yuborish",
+        'no_goal_speech'   : ("Hmm, *{name}*, sizni tushunaman 😊\n\n"
+                              "Lekin bir gap bor — moliyaviy maqsadi bo'lmaganlar o'rtacha 40% ko'proq sarflaydi. "
+                              "Chunki yo'nalish yo'q.\n\n"
+                              "Yordam beraymi? Hatto noaniq bo'lsa ham yozing — "
                               'masalan *"maosh oyiga yetib borsin"* yoki *"ta\'tilga borish"*:'),
-        'ask_notify_why'   : ('🔔 *{name}*, oxirgi savol!\n\n'
-                              'Men har kuni xarajatlarni yozib borishingizni eslatib turmoqchiman. '
-                              'Odamlarning 80% mayda xarajatlarni unutadi — '
+        'ask_notify_why'   : ("🔔 *{name}*, oxirgi savol!\n\n"
+                              "Men har kuni xarajatlarni yozib borishingizni eslatib turmoqchiman. "
+                              "Odamlarning 80% mayda xarajatlarni unutadi — "
                               'aynan ular pulni "yeb qo\'yadi".\n\n'
-                              'Kechqurun qaysi vaqt qulay?'),
+                              "Kechqurun qaysi vaqt qulay?"),
         'notify_18'        : '🕕 18:00',
         'notify_19'        : '🕖 19:00',
         'notify_20'        : '🕗 20:00',
@@ -354,40 +365,40 @@ T = {
         'notify_23'        : '🕙 23:00',
         'notify_custom'    : '✏️ Boshqa vaqt',
         'ask_notify_time'  : '⌚ Qulay vaqtni *SS:DD* formatida yozing (masalan: *20:30*):',
-        'notify_set'       : '✅ Har kuni *{time}* da eslatib turaman',
-        'welcome_done'     : ('🎉 *{name}*, Finoraga xush kelibsiz!\n\n'
-                              'Endi sizni tanidim va pul boshqarishda yordam beraman 💎\n\n'
-                              '*Qanday ishlaydi:*\n'
-                              '📝 Nima sarflaganingizni yozing — yozib olaman\n'
-                              '🎤 Ovoz bilan ayting — tushunaman\n'
-                              '📷 Chek rasmini yuboring — o\'zim o\'qiyman\n\n'
-                              '*Buyruqlar:*\n'
-                              '/stats — 📊 Statistika\n'
-                              '/history — 📋 Tarix\n'
-                              '/advice — 🤖 Shaxsiy maslahat\n'
-                              '/rate — 💱 Valyuta kursi\n'
-                              '/settings — ⚙️ Sozlamalar\n'
-                              '/goal — 🎯 Maqsad va progress\n'
-                              '/budget — 💰 Byudjetlar\n'
-                              '/bug — 🐛 Xatolik haqida xabar\n'
-                              '/help — ❓ Yordam\n\n'
-                              '_Menga yozing — boshlaymiz!_ 🚀'),
-        'processing'       : '⏳ O\'ylamoqda...',
+        'notify_set'       : "✅ Har kuni *{time}* da eslatib turaman",
+        'welcome_done'     : ("🎉 *{name}*, Finoraga xush kelibsiz!\n\n"
+                              "Endi sizni tanidim va pul boshqarishda yordam beraman 💎\n\n"
+                              "*Qanday ishlaydi:*\n"
+                              "📝 Nima sarflaganingizni yozing — yozib olaman\n"
+                              "🎤 Ovoz bilan ayting — tushunaman\n"
+                              "📷 Chek rasmini yuboring — o'zim o'qiyman\n\n"
+                              "*Buyruqlar:*\n"
+                              "/stats — 📊 Statistika\n"
+                              "/history — 📋 Tarix\n"
+                              "/advice — 🤖 Shaxsiy maslahat\n"
+                              "/rate — 💱 Valyuta kursi\n"
+                              "/settings — ⚙️ Sozlamalar\n"
+                              "/goal — 🎯 Maqsad va progress\n"
+                              "/budget — 💰 Byudjetlar\n"
+                              "/bug — 🐛 Xatolik haqida xabar\n"
+                              "/help — ❓ Yordam\n\n"
+                              "_Menga yozing — boshlaymiz!_ 🚀"),
+        'processing'       : "⏳ O'ylamoqda...",
         'added'            : '✅ Yozib oldim!',
         'type_inc'         : '📈 Daromad',
         'type_exp'         : '📉 Xarajat',
-        'no_data'          : '📭 Hali yozuv yo\'q. Nimaga sarflaganingizni yozing!',
-        'voice_error'      : '❌ Ovozni tushunmadim. Qayta urinib ko\'ring yoki matn yuboring.',
-        'photo_error'      : '❌ Chekni o\'qib bo\'lmadi. Aniqroq rasm yuborib ko\'ring.',
-        'parse_error'      : '🤔 Tushunmadim. Batafsilroq yozing, masalan: *Non sotib oldim 3 000 so\'m*',
-        'fix_prompt'       : '✏️ Nimani tuzatish kerak? Yangi miqdor yoki tavsifni yozing:',
+        'no_data'          : "📭 Hali yozuv yo'q. Nimaga sarflaganingizni yozing!",
+        'voice_error'      : "❌ Ovozni tushunmadim. Qayta urinib ko'ring yoki matn yuboring.",
+        'photo_error'      : "❌ Chekni o'qib bo'lmadi. Aniqroq rasm yuborib ko'ring.",
+        'parse_error'      : "🤔 Tushunmadim. Batafsilroq yozing, masalan: *Non sotib oldim 3 000 so'm*",
+        'fix_prompt'       : "✏️ Nimani tuzatish kerak? Yangi miqdor yoki tavsifni yozing:",
         'fixed'            : '✅ Tuzatdim!',
         'cancelled'        : '❌ Bekor qilindi.',
         'rate_err'         : '❌ Kursni ololmadim.',
         'advice_wait'      : '🤔 Moliyangizni tahlil qilyapman...',
-        'confirm_clear'    : '⚠️ *Barcha* ma\'lumotlarni o\'chirasizmi?',
-        'cleared'          : '🗑 Ma\'lumotlar o\'chirildi.',
-        'yes_del'          : '🗑 Ha, o\'chir',
+        'confirm_clear'    : "⚠️ *Barcha* ma'lumotlarni o'chirasizmi?",
+        'cleared'          : "🗑 Ma'lumotlar o'chirildi.",
+        'yes_del'          : "🗑 Ha, o'chir",
         'no_cancel'        : '← Bekor qilish',
         'stats_hdr'        : '📊 *Moliyaviy hisobot, {name}*',
         'all_time'         : 'Jami',
@@ -397,62 +408,83 @@ T = {
         'balance_lbl'      : 'Balans',
         'records_lbl'      : 'Yozuvlar',
         'hist_hdr'         : '📋 *Oxirgi yozuvlar*',
-        'rate_hdr'         : '💱 *O\'zbekiston MBi kursi*',
+        'rate_hdr'         : "💱 *O'zbekiston MBi kursi*",
         'advice_hdr'       : '💎 *Finora maslahat beradi:*',
         'updated'          : 'Yangilandi',
-        'remind_msg'       : ('Salom, *{name}*! 👋\n\n'
-                              'Kun qanday o\'tdi? Bugungi xarajatlarni yozishni unutmang — '
-                              'hatto maydalari ham.\n\n'
-                              'Aynan mayda xarajatlar pul ketayotgan joyni ko\'rsatadi 💸 '
-                              'Ularsiz maqsadga yetish mushkul!\n\n'
-                              '_Nima sarflaganingizni yozing — men yozib olaman_ ✍️'),
-        'help_text'        : ('❓ *Finoradan qanday foydalanish:*\n\n'
-                              '*Yozuv qo\'shish:*\n'
+        'remind_msg'       : ("Salom, *{name}*! 👋\n\n"
+                              "Kun qanday o'tdi? Bugungi xarajatlarni yozishni unutmang — "
+                              "hatto maydalari ham.\n\n"
+                              "Aynan mayda xarajatlar pul ketayotgan joyni ko'rsatadi 💸 "
+                              "Ularsiz maqsadga yetish mushkul!\n\n"
+                              "_Nima sarflaganingizni yozing — men yozib olaman_ ✍️"),
+        'help_text'        : ("❓ *Finoradan qanday foydalanish:*\n\n"
+                              "*Yozuv qo'shish:*\n"
                               '• Yozing: _"Non sotib oldim 3 000"\n'
-                              '• 🎤 Ovoz bilan\n'
-                              '• 📷 Chek rasmi\n\n'
+                              "• 🎤 Ovoz bilan\n"
+                              "• 📷 Chek rasmi\n\n"
                               '*Tuzatish:* _"tuzat"_ yoki _"bekor qil"_ yozing\n\n'
-                              '*Buyruqlar:*\n'
-                              '/stats — 📊 Statistika\n'
-                              '/history — 📋 Tarix\n'
-                              '/advice — 🤖 AI maslahat\n'
-                              '/rate — 💱 Valyuta kursi\n'
-                              '/goal — 🎯 Maqsad va progress\n'
-                              '/budget — 💰 Byudjetlar\n'
-                              '/settings — ⚙️ Sozlamalar\n'
-                              '/clear — 🗑 Ma\'lumotlarni o\'chirish'),
-        'settings_hdr'     : '⚙️ *Sozlamalar*\n\nNimani o\'zgartiroqsiz?',
+                              "*Buyruqlar:*\n"
+                              "/stats — 📊 Statistika\n"
+                              "/history — 📋 Tarix\n"
+                              "/advice — 🤖 AI maslahat\n"
+                              "/rate — 💱 Valyuta kursi\n"
+                              "/goal — 🎯 Maqsad va progress\n"
+                              "/budget — 💰 Byudjetlar\n"
+                              "/settings — ⚙️ Sozlamalar\n"
+                              "/clear — 🗑 Ma'lumotlarni o'chirish"),
+        'settings_hdr'     : "⚙️ *Sozlamalar*\n\nNimani o'zgartiroqsiz?",
         'set_notify'       : '🔔 Eslatma vaqti',
         'set_goal'         : '🎯 Moliyaviy maqsad',
         'set_name'         : '👤 Ismingiz',
-        'cancel_notify'    : '🔕 Eslatmalarni o\'chirish',
-        'notify_disabled'  : '🔕 Eslatmalar o\'chirildi.',
-        'confirm_hdr'      : '📝 Tekshir — to\'g\'ri tushundimmi:',
-        'confirm_correct'  : '✅ To\'g\'ri',
+        'cancel_notify'    : "🔕 Eslatmalarni o'chirish",
+        'notify_disabled'  : "🔕 Eslatmalar o'chirildi.",
+        'confirm_hdr'      : "📝 Tekshir — to'g'ri tushundimmi:",
+        'confirm_correct'  : "✅ To'g'ri",
         'confirm_edit'     : '✏️ Tuzatish',
         'confirm_cancel'   : '❌ Bekor qilish',
         'goal_hdr'         : '🎯 *Sening maqsading*',
-        'goal_add'         : '➕ Koptokka qo\'shish',
-        'goal_edit'        : '✏️ Maqsadni o\'zgartirish',
-        'goal_edit_amount' : '✏️ Summani o\'zgartirish',
-        'goal_add_amount'  : '💰 Qancha qo\'shish kerak?',
-        'goal_added'       : '✅ Maqsadga qo\'shildi!',
-        'goal_progress'   : '📊 Progress: {bar} {pct}%\n💰 Jamg\'arilgan: {saved} / {total}\n📅 Hozirgi tezlikda: ~{months} oy.',
-        'goal_no_amount'   : '💰 Summa o\'rnatilmagan. Summani yozing:',
+        'goal_add'         : "➕ Koptokka qo'shish",
+        'goal_edit'        : "✏️ Maqsadni o'zgartirish",
+        'goal_edit_amount' : "✏️ Summani o'zgartirish",
+        'goal_add_amount'  : "💰 Qancha qo'shish kerak?",
+        'goal_added'       : "✅ Maqsadga qo'shildi!",
+        'goal_progress'   : "📊 Progress: {bar} {pct}%\n💰 Jamg'arilgan: {saved} / {total}\n📅 Hozirgi tezlikda: ~{months} oy.",
+        'goal_no_amount'   : "💰 Summa o'rnatilmagan. Summani yozing:",
         'goal_amount_set'  : '✅ Maqsad summasi: {amount}',
         'budget_hdr'       : '💰 *Byudjetlar*',
-        'budget_add'       : '➕ Limit o\'rnatish',
-        'budget_delete'    : '🗑 Limitni o\'chirish',
-        'budget_no'        : '📭 Byudjetlar o\'rnatilmagan',
+        'budget_add'       : "➕ Limit o'rnatish",
+        'budget_delete'    : "🗑 Limitni o'chirish",
+        'budget_no'        : "📭 Byudjetlar o'rnatilmagan",
         'budget_item'      : '📊 {cat}: {spent}/{budget} ({pct}%)',
         'budget_80'        : '⚠️ {cat} limiti {pct}% ishlatildi',
         'budget_100'       : '🚨 {cat} limiti oshdi!',
         'budget_choose_cat': '🏷 Kategoriyani tanlang:',
         'budget_enter_amt' : '💰 Limit summasini yozing:',
         'budget_set'       : '✅ {cat} limiti: {amount}',
-        'budget_deleted'   : '🗑 Limit o\'chirildi',
-        'advice_40'        : '\n\n⚠️ *Tendencia:* bu oy {cat} uchun {amount} — bu daromadning {pct:.0f}% ini tashkil qiladi. Qayta ko\'rib chiqishga arzigoy?',
-        'advice_60'        : '\n\n🚨 *E\'tibor!* {cat} bu oy daromadingizning {pct:.0f}% ini yeb qo\'ydi! Bu {amount}. Qisqartirishni ko\'rib chiqamizmi? 👉 /advice',
+        'budget_deleted'   : "🗑 Limit o'chirildi",
+        'advice_40'        : "\n\n⚠️ *Tendencia:* bu oy {cat} uchun {amount} — bu daromadning {pct:.0f}% ini tashkil qiladi. Qayta ko'rib chiqishga arzigoy?",
+        'advice_60'        : "\n\n🚨 *E'tibor!* {cat} bu oy daromadingizning {pct:.0f}% ini yeb qo'ydi! Bu {amount}. Qisqartirishni ko'rib chiqamizmi? 👉 /advice",
+        'debt_payoff_warn': "⚠️ To'lov foizlarni qoplay olmaydi!",
+        'debt_close_success': "🎉🎉🎉 *AJOYIB!!!*\n\n*{bank}* kreditini {amount} ga yopdingiz!\n\nBu KATTA yutuq! 💪💎\n\n_/debts bilan qolganlarni ko'ring._",
+        'no_access'        : '❌ NoAccess',
+        'rate_limit'       : "⏳ Ko'p so'rovlar. Bir daqiqa kuting.",
+        'ttl_expired'       : "⏰ Ma'lumotlar eskirgan. Tranzaksiyani qayta yuboring.",
+        'debt_hdr'         : '💳 *Kreditlar*',
+        'debt_active'      : "Faol kreditlar yo'q 🎉",
+        'debt_debt_lbl'   : 'Qarz',
+        'debt_rate_lbl'   : 'Foiz',
+        'debt_monthly_lbl': 'Oylik',
+        'debt_deadline_lbl': 'Muddat',
+        'debt_close_lbl'  : "Yopishga",
+        'debt_total_lbl'  : 'Jami',
+        'debt_add_lbl'    : "Kredit qo'shish",
+        'debt_pay_lbl'    : "To'lov qilish",
+        'debt_close_lbl2' : "Kreditni yopish",
+        'top_expenses'    : 'Top xarajatlar',
+        'goal_no_set'     : "Maqsad o'rnatilmagan. /settings dan foydalaning",
+        'saved_lbl'       : "Jamg'arilgan",
+        'error_num'       : '❌ Raqam yozing',
+        'budget_err'      : "❌ Xatolik. Qayta urinib ko'ring",
     }
 }
 
@@ -466,7 +498,7 @@ def tx(uid_or_lang, key: str, **kwargs) -> str:
             pass
     return text
 
-# ────────────────────────── DATABASE (PostgreSQL) ─────────────────
+# ─── DATABASE ─────────────────────────────────────────────────────
 def _normalize_pg_url(url: str) -> str:
     if url.startswith('postgres://'):
         return 'postgresql://' + url[len('postgres://'):]
@@ -769,7 +801,7 @@ def get_month_expenses_by_category(uid: int) -> dict:
             )
             return {row[0]: float(row[1]) for row in c.fetchall()}
 
-# ────────────────────────── CURRENCY ──────────────────────────────
+# ─── CURRENCY ─────────────────────────────────────────────────────
 def get_rates() -> dict:
     try:
         resp = requests.get(
@@ -825,7 +857,7 @@ def fmt_amount(amount: float, cur: str, rates: dict) -> str:
         r = rates.get('USD', {}).get('avg', 0)
         return uzs(amount) + (f" ≈ ${amount / r:.2f}" if r else '')
 
-# ────────────────────────── AI ────────────────────────────────────
+# ─── AI ───────────────────────────────────────────────────────────
 _PARSE_SYS = """You parse financial transactions from Russian or Uzbek text.
 Return ONLY valid JSON, no markdown fences:
 {"type":"exp","amount":50000,"description":"brief name","category":"🍔 Еда","currency":"UZS","items":["item - price or just item"]}
@@ -956,9 +988,9 @@ async def ai_advice(uid: int, lang: str) -> str:
         sys_prompt = build_advisor_system(user, lang)
         return await asyncio.to_thread(_chat, sys_prompt, prompt, 700)
     except:
-        return '❌ Ошибка.' if lang == 'ru' else '❌ Xatolik.'
+        return tx(lang, 'rate_err')
 
-# ────────────────────────── VOICE (Groq Whisper) ──────────────────
+# ─── VOICE ────────────────────────────────────────────────────────
 def _transcribe_sync(ogg_path: str, lang: str) -> str | None:
     with open(ogg_path, 'rb') as f:
         ogg_bytes = f.read()
@@ -1001,7 +1033,6 @@ def _transcribe_sync(ogg_path: str, lang: str) -> str | None:
 async def transcribe(ogg_path: str, lang: str) -> str | None:
     return await asyncio.to_thread(_transcribe_sync, ogg_path, lang)
 
-
 import random as _random
 
 MOTIVATIONS = {
@@ -1028,7 +1059,7 @@ def maybe_motivate(lang: str) -> str:
         return _random.choice(MOTIVATIONS.get(lang, MOTIVATIONS['ru']))
     return ''
 
-# ────────────────────────── FORMATTERS ────────────────────────────
+# ─── FORMATTERS ───────────────────────────────────────────────────
 def fmt_tx_msg(parsed: dict, lang: str, rates: dict) -> str:
     cur   = parsed.get('currency', 'UZS')
     amt   = parsed['amount']
@@ -1036,7 +1067,7 @@ def fmt_tx_msg(parsed: dict, lang: str, rates: dict) -> str:
     label = tx(lang, 'type_exp') if parsed['type'] == 'exp' else tx(lang, 'type_inc')
 
     amt_str = fmt_amount(amt, cur, rates)
-    text = (f"✅ {'Yozib oldim' if lang == 'uz' else 'Записала'}!\n\n"
+    text = (f"✅ Записала!\n\n"
             f"{label}: `{sign}{amt_str}`\n"
             f"📝 {parsed.get('description', '')}\n"
             f"🏷 {parsed.get('category', '')}")
@@ -1115,7 +1146,31 @@ async def check_budget_warning(uid: int, lang: str, category: str) -> str:
     
     return ''
 
-# ────────────────────────── ONBOARDING ────────────────────────────
+# ─── HELPERS ──────────────────────────────────────────────────────
+def _check_rate_limit(uid: int) -> bool:
+    now = time.time()
+    window = _ai_rate_limit[uid]
+    window[:] = [t for t in window if now - t < _RATE_LIMIT_WINDOW]
+    if len(window) >= _RATE_LIMIT_MAX:
+        return False
+    window.append(now)
+    return True
+
+def _check_pending_tx_ttl(user_data: dict) -> bool:
+    pending = user_data.get('pending_tx')
+    if not pending:
+        return True
+    created_at = pending.get('_created_at', 0)
+    if time.time() - created_at > _PENDING_TX_TTL:
+        user_data.pop('pending_tx', None)
+        user_data.pop('pending_tx_edit', None)
+        return False
+    return True
+
+def _truncate(text: str, max_len: int) -> str:
+    return text[:max_len] if len(text) > max_len else text
+
+# ─── ONBOARDING ────────────────────────────────────────────────────
 async def send_onboarding_step(chat_id: int, uid: int, state: str, context):
     u    = get_user(uid)
     lang = u.get('language', 'ru')
@@ -1128,14 +1183,9 @@ async def send_onboarding_step(chat_id: int, uid: int, state: str, context):
         await context.bot.send_message(chat_id, tx(lang, 'ask_name'), parse_mode='Markdown')
 
     elif state == 'name_confirm':
-        if lang == 'ru':
-            confirm_msg = f"Тебя зовут *{name}*?"
-            yes_btn  = '✅ Да, всё верно'
-            edit_btn = '✏️ Изменить'
-        else:
-            confirm_msg = f"Ismingiz *{name}*mi?"
-            yes_btn  = "✅ Ha, to'g'ri"
-            edit_btn = "✏️ O'zgartirish"
+        confirm_msg = f"Тебя зовут *{name}*?" if lang == 'ru' else f"Ismingiz *{name}*mi?"
+        yes_btn  = '✅ Да, всё верно' if lang == 'ru' else "✅ Ha, to'g'ri"
+        edit_btn = '✏️ Изменить' if lang == 'ru' else "✏️ O'zgartirish"
         kb = [[
             InlineKeyboardButton(yes_btn,  callback_data='name_ok'),
             InlineKeyboardButton(edit_btn, callback_data='name_edit'),
@@ -1244,46 +1294,41 @@ async def send_onboarding_step(chat_id: int, uid: int, state: str, context):
         ds = get_debt_state(uid)
         progress = f" ({ds['current'] + 1}/{ds['target']})" if ds['target'] > 1 else ''
         kb = [[back_btn]]
+        msg = f"🏦 *Кредит{progress}*\n\nНазвание банка или кредитора?" if lang == 'ru' else f"🏦 *Kredit{progress}*\n\nBank yoki kreditor nomi?"
         await context.bot.send_message(
-            chat_id,
-            f"🏦 *Кредит{progress}*\n\nНазвание банка или кредитора?" if lang == 'ru'
-            else f"🏦 *Kredit{progress}*\n\nBank yoki kreditor nomi?",
+            chat_id, msg,
             reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
         )
 
     elif state == STATE_DEBT_AMT:
         kb = [[back_btn]]
+        msg = '💵 Сколько ты должен? Напиши сумму долга:' if lang == 'ru' else "💵 Qancha qarzingiz bor? Qarz miqdorini yozing:"
         await context.bot.send_message(
-            chat_id,
-            '💵 Сколько ты должен? Напиши сумму долга:' if lang == 'ru'
-            else "💵 Qancha qarzingiz bor? Qarz miqdorini yozing:",
+            chat_id, msg,
             reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
         )
 
     elif state == STATE_DEBT_RATE:
         kb = [[back_btn]]
+        msg = '📊 Процентная ставка в год? (например: *24*):' if lang == 'ru' else "📊 Yillik foiz stavkasi? (masalan: *24*):"
         await context.bot.send_message(
-            chat_id,
-            '📊 Процентная ставка в год? (например: *24*):' if lang == 'ru'
-            else "📊 Yillik foiz stavkasi? (masalan: *24*):",
+            chat_id, msg,
             reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
         )
 
     elif state == STATE_DEBT_MONTHLY:
         kb = [[back_btn]]
+        msg = '📅 Ежемесячный платёж? Напиши сумму:' if lang == 'ru' else "📅 Oylik to'lov? Miqdorni yozing:"
         await context.bot.send_message(
-            chat_id,
-            '📅 Ежемесячный платёж? Напиши сумму:' if lang == 'ru'
-            else "📅 Oylik to'lov? Miqdorni yozing:",
+            chat_id, msg,
             reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
         )
 
     elif state == STATE_DEBT_DEADLINE:
         kb = [[back_btn]]
+        msg = '⏳ Срок погашения? (например: *Июнь 2026* или *12 месяцев*):' if lang == 'ru' else "⏳ To'lash muddati? (masalan: *Iyun 2026* yoki *12 oy*):"
         await context.bot.send_message(
-            chat_id,
-            '⏳ Срок погашения? (например: *Июнь 2026* или *12 месяцев*):' if lang == 'ru'
-            else "⏳ To'lash muddati? (masalan: *Iyun 2026* yoki *12 oy*):",
+            chat_id, msg,
             reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
         )
 
@@ -1400,18 +1445,9 @@ async def generate_debt_strategy(uid: int, lang: str, chat_id: int, context: Con
     try:
         strategy = await asyncio.to_thread(_chat, sys_prompt, prompt, 800)
         strategy = strategy.replace('**', '*')
-        footer = (
-            "_Стратегию можно просмотреть командой /debts_"
-            if lang == 'ru' else
-            "_Strategiyani /debts buyrug'i bilan ko'rish mumkin_"
-        )
-        await context.bot.send_message(
-            chat_id,
-            f"💎 *Твоя персональная стратегия погашения долгов:*\n\n{strategy}\n\n{footer}"
-            if lang == 'ru' else
-            f"💎 *Sizning kreditlarni to'lash strategiyangiz:*\n\n{strategy}\n\n{footer}",
-            parse_mode='Markdown'
-        )
+        footer = "_Стратегию можно просмотреть командой /debts_" if lang == 'ru' else "_Strategiyani /debts buyrug'i bilan ko'rish mumkin_"
+        msg = f"💎 *Твоя персональная стратегия погашения долгов:*\n\n{strategy}\n\n{footer}" if lang == 'ru' else f"💎 *Sizning kreditlarni to'lash strategiyangiz:*\n\n{strategy}\n\n{footer}"
+        await context.bot.send_message(chat_id, msg, parse_mode='Markdown')
     except Exception as e:
         logger.error(f'Debt strategy generation failed: {e}')
         msg = '✅ Кредиты записаны! Стратегию смотри в /debts' if lang == 'ru' else '✅ Kreditlar yozildi! Strategiyani /debts da ko\'ring'
@@ -1447,7 +1483,6 @@ async def setup_bot_ui(app: Application):
     ]
     await app.bot.set_my_commands(commands)
 
-    # WebApp кнопка в меню
     webapp_url = os.getenv('WEBAPP_URL', '')
     if webapp_url:
         await app.bot.set_chat_menu_button(
@@ -1457,7 +1492,7 @@ async def setup_bot_ui(app: Application):
             )
         )
 
-# ─── CALLBACKS ───────────────────────────────────────────────────
+# ─── CALLBACKS ────────────────────────────────────────────────────
 async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = upd.callback_query
     data = q.data
@@ -1465,12 +1500,10 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = upd.effective_chat.id
     lang = get_lang(uid)
 
-    # FIX: Check pending_tx TTL before using it
     if not _check_pending_tx_ttl(ctx.user_data):
-        await q.answer('⏰ Данные устарели. Отправьте транзакцию заново.', show_alert=True)
+        await q.answer(tx(lang, 'ttl_expired'), show_alert=True)
         return
 
-    # PENDING TX CALLBACKS
     if data == 'tx_confirm':
         pending = ctx.user_data.get('pending_tx')
         if pending:
@@ -1498,7 +1531,7 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
             try: await q.message.edit_text(reply, parse_mode='Markdown', reply_markup=None)
             except: await q.message.reply_text(reply, parse_mode='Markdown')
         else:
-            await q.answer('❌ Данные устарели')
+            await q.answer(tx(lang, 'ttl_expired'))
         return
 
     if data == 'tx_edit':
@@ -1512,7 +1545,7 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 tx(lang, 'fix_prompt'), parse_mode='Markdown'
             )
         else:
-            await q.answer('❌ Данные устарели')
+            await q.answer(tx(lang, 'ttl_expired'))
         return
 
     if data == 'tx_cancel':
@@ -1546,12 +1579,8 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         try: await q.message.delete()
         except: pass
-        await ctx.bot.send_message(
-            chat_id,
-            '🎯 Напиши новую финансовую цель:' if lang == 'ru'
-            else '🎯 Yangi moliyaviy maqsadingizni yozing:',
-            parse_mode='Markdown'
-        )
+        msg = '🎯 Напиши новую финансовую цель:' if lang == 'ru' else '🎯 Yangi moliyaviy maqsadingizni yozing:'
+        await ctx.bot.send_message(chat_id, msg, parse_mode='Markdown')
         return
 
     if data == 'goal_edit_amount':
@@ -1559,9 +1588,7 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         try: await q.message.delete()
         except: pass
-        await ctx.bot.send_message(
-            chat_id, tx(lang, 'goal_no_amount'), parse_mode='Markdown'
-        )
+        await ctx.bot.send_message(chat_id, tx(lang, 'goal_no_amount'), parse_mode='Markdown')
         return
 
     if data == 'budget_add':
@@ -1585,15 +1612,13 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         try: await q.message.delete()
         except: pass
-        await ctx.bot.send_message(
-            chat_id, tx(lang, 'budget_enter_amt'), parse_mode='Markdown'
-        )
+        await ctx.bot.send_message(chat_id, tx(lang, 'budget_enter_amt'), parse_mode='Markdown')
         return
 
     if data == 'budget_delete':
         budgets = get_budgets(uid)
         if not budgets:
-            await q.answer('📭 Нет бюджетов')
+            await q.answer('📭 ' + ('Нет бюджетов' if lang == 'ru' else 'Byudjetlar yo\'q'))
             return
         kb = [[InlineKeyboardButton(cat, callback_data=f'budget_del_{cat}')] for cat in budgets.keys()]
         kb.append([InlineKeyboardButton('← Назад' if lang == 'ru' else '← Orqaga', callback_data='cmd_budget')])
@@ -1635,25 +1660,20 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 c.execute('SELECT id, bank, amount FROM debts WHERE user_id=%s ORDER BY rate DESC', (uid,))
                 debts = c.fetchall()
         if not debts:
-            await q.answer('❌ Нет кредитов!' if lang == 'ru' else "❌ Kreditlar yo'q!"); return
+            await q.answer(tx(lang, 'no_access')); return
         kb = [[InlineKeyboardButton(f"{bank} ({uzs(amt)})", callback_data=f'pay_{id_}')]
               for id_, bank, amt in debts]
         kb.append([InlineKeyboardButton('← Отмена' if lang == 'ru' else '← Bekor qilish', callback_data='debts_cancel')])
-        await q.edit_message_text(
-            '✅ *Какой кредит платишь?*' if lang == 'ru' else "✅ *Qaysi kreditni to'layapsiz?*",
-            reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
-        )
+        msg = '✅ *Какой кредит платишь?*' if lang == 'ru' else "✅ *Qaysi kreditni to'layapsiz?*"
+        await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
         return
 
     if data.startswith('pay_'):
         debt_id = int(data[4:])
         ctx.user_data['paying_debt_id'] = debt_id
         set_user(uid, onboarding_state='debt_payment')
-        await q.edit_message_text(
-            '💰 *Сколько заплатил?*\n\nНапиши сумму платежа:' if lang == 'ru'
-            else "💰 *Qancha to'ladingiz?*\n\nTo'lov summasini yozing:",
-            parse_mode='Markdown'
-        )
+        msg = '💰 *Сколько заплатил?*\n\nНапиши сумму платежа:' if lang == 'ru' else "💰 *Qancha to'ladingiz?*\n\nTo'lov summasini yozing:"
+        await q.edit_message_text(msg, parse_mode='Markdown')
         return
 
     if data == 'debt_close':
@@ -1662,14 +1682,12 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 c.execute('SELECT id, bank, amount FROM debts WHERE user_id=%s', (uid,))
                 debts = c.fetchall()
         if not debts:
-            await q.answer('❌ Нет кредитов!' if lang == 'ru' else "❌ Kreditlar yo'q!"); return
+            await q.answer(tx(lang, 'no_access')); return
         kb = [[InlineKeyboardButton(f"🎉 {bank}", callback_data=f'close_{id_}')]
               for id_, bank, amt in debts]
         kb.append([InlineKeyboardButton('← Отмена' if lang == 'ru' else '← Bekor qilish', callback_data='debts_cancel')])
-        await q.edit_message_text(
-            '🎉 *Какой кредит закрыл полностью?*' if lang == 'ru' else "🎉 *Qaysi kreditni to'liq yopdingiz?*",
-            reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
-        )
+        msg = '🎉 *Какой кредит закрыл полностью?*' if lang == 'ru' else "🎉 *Qaysi kreditni to'liq yopdingiz?*"
+        await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
         return
 
     if data.startswith('close_'):
@@ -1685,12 +1703,8 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     bank, amount = '?', 0
             conn.commit()
         await q.answer('🎉 Поздравляю!' if lang == 'ru' else '🎉 Tabriklayman!')
-        await q.edit_message_text(
-            f"🎉🎉🎉 *КРАСАВА!!!*\n\nТы закрыл кредит *{bank}* на {uzs(amount)}!\n\nЭто ОГРОМНОЕ достижение! 💪💎\n\n_Используй /debts чтобы посмотреть остальные._"
-            if lang == 'ru' else
-            f"🎉🎉🎉 *AJOYIB!!!*\n\n*{bank}* kreditini {uzs(amount)} ga yopdingiz!\n\nBu KATTA yutuq! 💪💎\n\n_/debts bilan qolganlarni ko'ring._",
-            parse_mode='Markdown'
-        )
+        msg = tx(lang, 'debt_close_success', bank=bank, amount=uzs(amount))
+        await q.edit_message_text(msg, parse_mode='Markdown')
         return
 
     if data == 'debts_cancel':
@@ -1777,12 +1791,8 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except: pass
         if data == 'goal_debt':
             set_user(uid, onboarding_state=STATE_DEBT_COUNT)
-            await ctx.bot.send_message(
-                chat_id,
-                '💳 Сколько у тебя кредитов?\n\nНапиши число (от 1 до 10):' if lang == 'ru'
-                else "💳 Nechta kreditingiz bor?\n\nRaqam yozing (1 dan 10 gacha):",
-                parse_mode='Markdown'
-            )
+            msg = '💳 Сколько у тебя кредитов?\n\nНапиши число (от 1 до 10):' if lang == 'ru' else "💳 Nechta kreditingiz bor?\n\nRaqam yozing (1 dan 10 gacha):"
+            await ctx.bot.send_message(chat_id, msg, parse_mode='Markdown')
         else:
             set_user(uid, onboarding_state=STATE_GOAL_AMOUNT)
             await send_onboarding_step(chat_id, uid, STATE_GOAL_AMOUNT, ctx)
@@ -1829,7 +1839,8 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except: pass
             await send_onboarding_step(chat_id, uid, prev_st, ctx)
         else:
-            await q.answer('↩️ Нельзя вернуться' if lang == 'ru' else "↩️ Qaytib bo'lmaydi")
+            msg = '↩️ Нельзя вернуться' if lang == 'ru' else "↩️ Qaytib bo'lmaydi"
+            await q.answer(msg)
         return
 
     if data == 'confirm_clear':
@@ -1864,7 +1875,7 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith('reset_onb_'):
         if uid != ADMIN_ID:
-            await q.answer('❌ Нет доступа'); return
+            await q.answer(tx(lang, 'no_access')); return
         target_uid = int(data[len('reset_onb_'):])
         reset_onboarding_only(target_uid)
         await q.answer('✅ Онбординг сброшен')
@@ -1876,7 +1887,7 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith('reset_full_'):
         if uid != ADMIN_ID:
-            await q.answer('❌ Нет доступа'); return
+            await q.answer(tx(lang, 'no_access')); return
         target_uid = int(data[len('reset_full_'):])
         full_reset_user(target_uid)
         await q.answer('✅ Полный сброс выполнен')
@@ -1888,7 +1899,7 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith('reset_select_'):
         if uid != ADMIN_ID:
-            await q.answer('❌ Нет доступа'); return
+            await q.answer(tx(lang, 'no_access')); return
         target_uid = int(data[len('reset_select_'):])
         kb = [
             [InlineKeyboardButton('🔄 Сбросить онбординг', callback_data=f'reset_onb_{target_uid}')],
@@ -1903,7 +1914,7 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == 'reset_cancel':
         if uid != ADMIN_ID:
-            await q.answer('❌ Нет доступа'); return
+            await q.answer(tx(lang, 'no_access')); return
         await q.answer('Отменено')
         try: await q.message.delete()
         except: pass
@@ -1914,12 +1925,8 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         try: await q.message.delete()
         except: pass
-        await ctx.bot.send_message(
-            chat_id,
-            '⌚ Напиши новое время уведомления (*ЧЧ:ММ*):' if lang == 'ru'
-            else '⌚ Yangi eslatma vaqtini yozing (*SS:DD*):',
-            parse_mode='Markdown'
-        )
+        msg = '⌚ Напиши новое время уведомления (*ЧЧ:ММ*):' if lang == 'ru' else '⌚ Yangi eslatma vaqtini yozing (*SS:DD*):'
+        await ctx.bot.send_message(chat_id, msg, parse_mode='Markdown')
         return
 
     if data == 'set_goal':
@@ -1927,11 +1934,8 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         try: await q.message.delete()
         except: pass
-        await ctx.bot.send_message(
-            chat_id,
-            '🎯 Напиши новую финансовую цель:' if lang == 'ru' else '🎯 Yangi moliyaviy maqsadingizni yozing:',
-            parse_mode='Markdown'
-        )
+        msg = '🎯 Напиши новую финансовую цель:' if lang == 'ru' else '🎯 Yangi moliyaviy maqsadingizni yozing:'
+        await ctx.bot.send_message(chat_id, msg, parse_mode='Markdown')
         return
 
     if data == 'set_name':
@@ -1939,11 +1943,8 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         try: await q.message.delete()
         except: pass
-        await ctx.bot.send_message(
-            chat_id,
-            '👤 Напиши своё имя:' if lang == 'ru' else '👤 Ismingizni yozing:',
-            parse_mode='Markdown'
-        )
+        msg = '👤 Напиши своё имя:' if lang == 'ru' else '👤 Ismingizni yozing:'
+        await ctx.bot.send_message(chat_id, msg, parse_mode='Markdown')
         return
 
     if data == 'cancel_notify':
@@ -1954,37 +1955,7 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await q.answer()
 
-# ────────────────────────── HELPER: Rate Limiting ──────────────────
-def _check_rate_limit(uid: int) -> bool:
-    """Check if user exceeded rate limit. Returns True if allowed, False if blocked."""
-    now = time.time()
-    window = _ai_rate_limit[uid]
-    # Remove old entries outside the window
-    window[:] = [t for t in window if now - t < _RATE_LIMIT_WINDOW]
-    if len(window) >= _RATE_LIMIT_MAX:
-        return False
-    window.append(now)
-    return True
-
-# ────────────────────────── HELPER: TTL Check for Pending TX ──────
-def _check_pending_tx_ttl(user_data: dict) -> bool:
-    """Check if pending_tx is still valid (not expired). Returns True if valid."""
-    pending = user_data.get('pending_tx')
-    if not pending:
-        return True
-    created_at = pending.get('_created_at', 0)
-    if time.time() - created_at > _PENDING_TX_TTL:
-        user_data.pop('pending_tx', None)
-        user_data.pop('pending_tx_edit', None)
-        return False
-    return True
-
-# ────────────────────────── HELPER: Validate Input Length ──────────
-def _truncate(text: str, max_len: int) -> str:
-    """Truncate text to max length."""
-    return text[:max_len] if len(text) > max_len else text
-
-# ────────────────────────── TEXT HANDLER ──────────────────────────
+# ─── TEXT HANDLER ───────────────────────────────────────────────────
 async def on_text(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = upd.message.text.strip()
     uid = upd.effective_user.id
@@ -2023,21 +1994,17 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
             count = int(text.strip())
             if count <= 0: raise ValueError('zero')
             if count > 10:
-                await upd.message.reply_text(
-                    '❌ Максимум 10 кредитов. Напиши число от 1 до 10:' if lang == 'ru'
-                    else '❌ Maksimal 10 kredit. 1 dan 10 gacha raqam yozing:',
-                    parse_mode='Markdown'
-                )
+                msg = '❌ Максимум 10 кредитов. Напиши число от 1 до 10:' if lang == 'ru' else '❌ Maksimal 10 kredit. 1 dan 10 gacha raqam yozing:'
+                await upd.message.reply_text(msg, parse_mode='Markdown')
                 return
             set_user(uid, onboarding_state=STATE_DEBT_BANK)
             set_debt_state(uid, target=count, current=0, temp={})
-            await upd.message.reply_text('✅ Отлично! Начинаю собирать данные...' if lang == 'ru' else "✅ Zo'r! Ma'lumotlarni to'playapman...")
+            msg = '✅ Отлично! Начинаю собирать данные...' if lang == 'ru' else "✅ Zo'r! Ma'lumotlarni to'playapman..."
+            await upd.message.reply_text(msg, parse_mode='Markdown')
             await send_onboarding_step(chat_id, uid, STATE_DEBT_BANK, ctx)
         except ValueError:
-            await upd.message.reply_text(
-                '❌ Напиши число от 1 до 10, например: *3*' if lang == 'ru' else "❌ 1 dan 10 gacha raqam yozing, masalan: *3*",
-                parse_mode='Markdown'
-            )
+            msg = '❌ Напиши число от 1 до 10, например: *3*' if lang == 'ru' else "❌ 1 dan 10 gacha raqam yozing, masalan: *3*"
+            await upd.message.reply_text(msg, parse_mode='Markdown')
         return
 
     elif state == STATE_DEBT_BANK:
@@ -2059,7 +2026,7 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
             set_user(uid, onboarding_state=STATE_DEBT_RATE)
             await send_onboarding_step(chat_id, uid, STATE_DEBT_RATE, ctx)
         except:
-            await upd.message.reply_text('❌ Напиши число' if lang == 'ru' else '❌ Raqam yozing', parse_mode='Markdown')
+            await upd.message.reply_text(tx(lang, 'error_num'), parse_mode='Markdown')
         return
 
     elif state == STATE_DEBT_RATE:
@@ -2072,7 +2039,8 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
             set_user(uid, onboarding_state=STATE_DEBT_MONTHLY)
             await send_onboarding_step(chat_id, uid, STATE_DEBT_MONTHLY, ctx)
         except:
-            await upd.message.reply_text('❌ Напиши число, например: *24*' if lang == 'ru' else "❌ Raqam yozing, masalan: *24*", parse_mode='Markdown')
+            msg = '❌ Напиши число, например: *24*' if lang == 'ru' else "❌ Raqam yozing, masalan: *24*"
+            await upd.message.reply_text(msg, parse_mode='Markdown')
         return
 
     elif state == STATE_DEBT_MONTHLY:
@@ -2085,7 +2053,7 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
             set_user(uid, onboarding_state=STATE_DEBT_DEADLINE)
             await send_onboarding_step(chat_id, uid, STATE_DEBT_DEADLINE, ctx)
         except:
-            await upd.message.reply_text('❌ Напиши число' if lang == 'ru' else '❌ Raqam yozing', parse_mode='Markdown')
+            await upd.message.reply_text(tx(lang, 'error_num'), parse_mode='Markdown')
         return
 
     elif state == STATE_DEBT_DEADLINE:
@@ -2105,20 +2073,12 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
         set_debt_state(uid, current=current, temp={})
         if current < target:
             set_user(uid, onboarding_state=STATE_DEBT_BANK)
-            await upd.message.reply_text(
-                f'✅ Записал!\n\n▶️ Следующий кредит ({current + 1} из {target})...'
-                if lang == 'ru' else
-                f"✅ Yozib oldim!\n\n▶️ Keyingi kredit ({current + 1} / {target})...",
-                parse_mode='Markdown'
-            )
+            msg = f"✅ Записал!\n\n▶️ Следующий кредит ({current + 1} из {target})..." if lang == 'ru' else f"✅ Yozib oldim!\n\n▶️ Keyingi kredit ({current + 1} / {target})..."
+            await upd.message.reply_text(msg, parse_mode='Markdown')
             await send_onboarding_step(chat_id, uid, STATE_DEBT_BANK, ctx)
         else:
-            await upd.message.reply_text(
-                '✅ Все кредиты записаны!\n\n⏳ Анализирую и создаю стратегию...'
-                if lang == 'ru' else
-                "✅ Barcha kreditlar yozildi!\n\n⏳ Tahlil qilyapman va strategiya tuzmoqdaman...",
-                parse_mode='Markdown'
-            )
+            msg = '✅ Все кредиты записаны!\n\n⏳ Анализирую и создаю стратегию...' if lang == 'ru' else "✅ Barcha kreditlar yozildi!\n\n⏳ Tahlil qilyapman va strategiya tuzmoqdaman..."
+            await upd.message.reply_text(msg, parse_mode='Markdown')
             await generate_debt_strategy(uid, lang, chat_id, ctx)
         return
 
@@ -2135,14 +2095,16 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
                         new_amt = old_amt - payment
                         if new_amt <= 0:
                             c.execute('DELETE FROM debts WHERE id=%s AND user_id=%s', (debt_id, uid))
-                            reply = (f"🎉🎉🎉 *ПОЗДРАВЛЯЮ!!!*\n\nТы полностью закрыл кредит *{bank}*!\n\nЭто огромный шаг к финансовой свободе! 💪\n\n_/debts для оставшихся кредитов_"
-                                     if lang == 'ru' else
-                                     f"🎉🎉🎉 *TABRIKLAYMAN!!!*\n\n*{bank}* kreditini to'liq yopdingiz!\n\nBu moliyaviy erkinlikka katta qadam! 💪\n\n_/debts — qolgan kreditlar_")
+                            reply = (
+                                f"🎉🎉🎉 *ПОЗДРАВЛЯЮ!!!*\n\nТы полностью закрыл кредит *{bank}*!\n\nЭто огромный шаг к финансовой свободе! 💪\n\n_/debts для оставшихся кредитов_"
+                                if lang == 'ru' else
+                                f"🎉🎉🎉 *TABRIKLAYMAN!!!*\n\n*{bank}* kreditini to'liq yopdingiz!\n\nBu moliyaviy erkinlikka katta qadam! 💪\n\n_/debts — qolgan kreditlar_")
                         else:
                             c.execute('UPDATE debts SET amount=%s WHERE id=%s AND user_id=%s', (new_amt, debt_id, uid))
-                            reply = (f"✅ *Платёж записан!*\n\n{bank}:\nБыло: `{uzs(old_amt)}`\nСтало: `{uzs(new_amt)}`\n\n💪 Так держать!"
-                                     if lang == 'ru' else
-                                     f"✅ *To'lov yozildi!*\n\n{bank}:\nAvval: `{uzs(old_amt)}`\nEndi: `{uzs(new_amt)}`\n\n💪 Davom eting!")
+                            reply = (
+                                f"✅ *Платёж записан!*\n\n{bank}:\nБыло: `{uzs(old_amt)}`\nСтало: `{uzs(new_amt)}`\n\n💪 Так держать!"
+                                if lang == 'ru' else
+                                f"✅ *To'lov yozildi!*\n\n{bank}:\nAvval: `{uzs(old_amt)}`\nEndi: `{uzs(new_amt)}`\n\n💪 Davom eting!")
                     else:
                         reply = '❌ Кредит не найден' if lang == 'ru' else "❌ Kredit topilmadi"
                 conn.commit()
@@ -2150,7 +2112,7 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
             ctx.user_data.pop('paying_debt_id', None)
             await upd.message.reply_text(reply, parse_mode='Markdown')
         except:
-            await upd.message.reply_text('❌ Напиши число' if lang == 'ru' else '❌ Raqam yozing')
+            await upd.message.reply_text(tx(lang, 'error_num'))
         return
 
     elif state == STATE_NAME:
@@ -2168,10 +2130,8 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
             set_user(uid, income_amt=float(cleaned), onboarding_state=STATE_CURRENCY)
             await send_onboarding_step(chat_id, uid, STATE_CURRENCY, ctx)
         except Exception:
-            await upd.message.reply_text(
-                '❌ Напиши число, например: *500000*' if lang == 'ru' else '❌ Raqam yozing, masalan: *500000*',
-                parse_mode='Markdown'
-            )
+            msg = '❌ Напиши число, например: *500000*' if lang == 'ru' else '❌ Raqam yozing, masalan: *500000*'
+            await upd.message.reply_text(msg, parse_mode='Markdown')
         return
 
     elif state == STATE_SIDE_AMT:
@@ -2179,7 +2139,7 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
             set_user(uid, side_income=float(text.replace(' ', '').replace(',', '.')), onboarding_state=STATE_GOAL)
             await send_onboarding_step(chat_id, uid, STATE_GOAL, ctx)
         except Exception:
-            await upd.message.reply_text('❌ Напиши число' if lang == 'ru' else '❌ Raqam yozing', parse_mode='Markdown')
+            await upd.message.reply_text(tx(lang, 'error_num'), parse_mode='Markdown')
         return
 
     elif state == STATE_GOAL_CUSTOM:
@@ -2214,7 +2174,8 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
                 await upd.message.reply_text(tx(lang, 'notify_set', time=time_str), parse_mode='Markdown')
                 await upd.message.reply_text(tx(lang, 'welcome_done', name=u2.get('name', '')), parse_mode='Markdown')
                 return
-        await upd.message.reply_text('❌ Формат: *20:30*' if lang == 'ru' else '❌ Format: *20:30*', parse_mode='Markdown')
+        msg = '❌ Формат: *20:30*' if lang == 'ru' else '❌ Format: *20:30*'
+        await upd.message.reply_text(msg, parse_mode='Markdown')
         return
 
     elif state == STATE_BUG_REPORT:
@@ -2226,19 +2187,15 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
         if not name_new:
             name_new = text.strip().split()[0].capitalize() if text.strip() else text.strip()
         set_user(uid, name=name_new, onboarding_state=STATE_DONE)
-        await upd.message.reply_text(
-            f"✅ Имя изменено на *{name_new}*" if lang == 'ru' else f"✅ Ism *{name_new}* ga o'zgartirildi",
-            parse_mode='Markdown'
-        )
+        msg = f"✅ Имя изменено на *{name_new}*" if lang == 'ru' else f"✅ Ism *{name_new}* ga o'zgartirildi"
+        await upd.message.reply_text(msg, parse_mode='Markdown')
         return
 
     elif state == 'set_goal':
         goal_val = _truncate(text.strip(), _MAX_LEN_GOAL)
         set_user(uid, goal=goal_val, onboarding_state=STATE_DONE)
-        await upd.message.reply_text(
-            f"✅ Цель обновлена: _{goal_val}_" if lang == 'ru' else f"✅ Maqsad yangilandi: _{goal_val}_",
-            parse_mode='Markdown'
-        )
+        msg = f"✅ Цель обновлена: _{goal_val}_" if lang == 'ru' else f"✅ Maqsad yangilandi: _{goal_val}_"
+        await upd.message.reply_text(msg, parse_mode='Markdown')
         return
 
     elif state == 'set_notify_time':
@@ -2251,7 +2208,8 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
                 set_user(uid, notify_time=ts2, notify_enabled=1, onboarding_state=STATE_DONE)
                 await upd.message.reply_text(tx(lang, 'notify_set', time=ts2), parse_mode='Markdown')
                 return
-        await upd.message.reply_text('❌ Формат: *20:30*' if lang == 'ru' else '❌ Format: *20:30*', parse_mode='Markdown')
+        msg = '❌ Формат: *20:30*' if lang == 'ru' else '❌ Format: *20:30*'
+        await upd.message.reply_text(msg, parse_mode='Markdown')
         return
 
     elif state == 'goal_add_amount':
@@ -2263,7 +2221,7 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
             await upd.message.reply_text(tx(lang, 'goal_added'), parse_mode='Markdown')
             await cmd_goal(upd, ctx)
         except:
-            await upd.message.reply_text('❌ Напиши число' if lang == 'ru' else '❌ Raqam yozing', parse_mode='Markdown')
+            await upd.message.reply_text(tx(lang, 'error_num'), parse_mode='Markdown')
         return
 
     elif state == 'goal_set_amount':
@@ -2275,13 +2233,13 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
             )
             await cmd_goal(upd, ctx)
         except:
-            await upd.message.reply_text('❌ Напиши число' if lang == 'ru' else '❌ Raqam yozing', parse_mode='Markdown')
+            await upd.message.reply_text(tx(lang, 'error_num'), parse_mode='Markdown')
         return
 
     elif state == 'budget_set_amount':
         category = ctx.user_data.pop('budget_category', None)
         if not category:
-            await upd.message.reply_text('❌ Ошибка. Попробуй ещё раз.' if lang == 'ru' else "❌ Xatolik. Qayta urinib ko'ring")
+            await upd.message.reply_text(tx(lang, 'budget_err'), parse_mode='Markdown')
             return
         try:
             amount = float(text.replace(' ', '').replace(',', '.'))
@@ -2292,24 +2250,18 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
             )
             await cmd_budget(upd, ctx)
         except:
-            await upd.message.reply_text('❌ Напиши число' if lang == 'ru' else '❌ Raqam yozing', parse_mode='Markdown')
+            await upd.message.reply_text(tx(lang, 'error_num'), parse_mode='Markdown')
         return
 
     else:
         u3 = get_user(uid)
         if not u3.get('onboarding_done'):
-            await upd.message.reply_text(
-                '❓ Напиши /start чтобы начать' if lang == 'ru' else '❓ /start yozing'
-            )
+            msg = '❓ Напиши /start чтобы начать' if lang == 'ru' else '❓ /start yozing'
+            await upd.message.reply_text(msg)
             return
 
-        # FIX: Rate limit check before AI call
         if not _check_rate_limit(uid):
-            await upd.message.reply_text(
-                '⏳ Слишком много запросов. Подожди минуту.' if lang == 'ru'
-                else "⏳ Ko'p so'rovlar. Bir daqiqa kuting.",
-                parse_mode='Markdown'
-            )
+            await upd.message.reply_text(tx(lang, 'rate_limit'), parse_mode='Markdown')
             return
 
         wait_msg = await upd.message.reply_text(tx(lang, 'processing'), parse_mode='Markdown')
@@ -2353,11 +2305,12 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
             InlineKeyboardButton(tx(lang, 'confirm_cancel'), callback_data='tx_cancel'),
         ]]
         
+        parsed['_created_at'] = time.time()
         ctx.user_data['pending_tx'] = parsed
         
         await upd.message.reply_text(card_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
-# ────────────────────────── COMMAND HANDLERS ──────────────────────
+# ─── COMMAND HANDLERS ──────────────────────────────────────────────
 async def cmd_start(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = upd.effective_user.id
     u   = get_user(uid)
@@ -2365,10 +2318,8 @@ async def cmd_start(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if u.get('onboarding_done'):
         name = u.get('name', '')
-        greet = (f"👋 Привет, *{name}*! Я здесь 💎\n\nНапиши что потратил или заработал"
-                 if lang == 'ru' else
-                 f"👋 Salom, *{name}*! Men bu yerdaman 💎\n\nNima sarflaganingizni yozing")
-        await upd.message.reply_text(greet, parse_mode='Markdown')
+        msg = f"👋 Привет, *{name}*! Я здесь 💎\n\nНапиши что потратил или заработал" if lang == 'ru' else f"👋 Salom, *{name}*! Men bu yerdaman 💎\n\nNima sarflaganingizni yozing"
+        await upd.message.reply_text(msg, parse_mode='Markdown')
         return
 
     set_user(uid, onboarding_state=STATE_LANG)
@@ -2400,13 +2351,13 @@ async def cmd_stats(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     msg = (f"{tx(lang, 'stats_hdr', name=name)}\n\n"
            f"*{tx(lang, 'all_time')}:*\n"
-           f"{tx(lang, 'income_lbl')}: `{uzs(s['inc'])}`\n"
-           f"{tx(lang, 'expense_lbl')}: `{uzs(s['exp'])}`\n"
+           f"{tx(lang, 'income_lbl')}: `{uzs(s['inc']}`\n"
+           f"{tx(lang, 'expense_lbl')}: `{uzs(s['exp']}`\n"
            f"{tx(lang, 'balance_lbl')}: `{bal_s}`\n"
            f"{tx(lang, 'records_lbl')}: {s['count']}\n\n"
            f"*{tx(lang, 'this_month')}:*\n"
-           f"{tx(lang, 'income_lbl')}: `{uzs(s['m_inc'])}`\n"
-           f"{tx(lang, 'expense_lbl')}: `{uzs(s['m_exp'])}`\n"
+           f"{tx(lang, 'income_lbl')}: `{uzs(s['m_inc']}`\n"
+           f"{tx(lang, 'expense_lbl')}: `{uzs(s['m_exp']}`\n"
            f"{tx(lang, 'balance_lbl')}: `{m_s}`")
 
     if u.get('goal') and u.get('goal_amount', 0) > 0:
@@ -2426,7 +2377,8 @@ async def cmd_stats(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f"{tx(lang, 'goal_progress', bar=bar, pct=int(pct), saved=uzs(goal_saved), total=uzs(goal_amount), months=months if months else '?')}")
 
     if s['cats']:
-        msg += f"\n\n📊 *{'Топ расходов' if lang == 'ru' else 'Top xarajatlar'}:*\n"
+        top_lbl = tx(lang, 'top_expenses')
+        msg += f"\n\n📊 *{top_lbl}:*\n"
         for i, (cat, amt) in enumerate(s['cats'], 1):
             msg += f"  {i}. {cat}: `{uzs(amt)}`\n"
 
@@ -2488,7 +2440,9 @@ async def cmd_rate(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
             continue
         src = '🏦' if r.get('source') == 'cbu' else '💹'
         if r['buy'] != r['sell']:
-            lines.append(f"{src} *{ccy}*: {'покупка' if lang == 'ru' else 'sotib olish'} `{r['buy']:,.0f}` / {'продажа' if lang == 'ru' else 'sotish'} `{r['sell']:,.0f}`")
+            buy_lbl = 'покупка' if lang == 'ru' else 'sotib olish'
+            sell_lbl = 'продажа' if lang == 'ru' else 'sotish'
+            lines.append(f"{src} *{ccy}*: {buy_lbl} `{r['buy']:,.0f}` / {sell_lbl} `{r['sell']:,.0f}`")
         else:
             lines.append(f"{src} *{ccy}*: `{r['avg']:,.0f}` so'm")
     lines.append(f"\n_{tx(lang, 'updated')}: {now_str}_")
@@ -2526,7 +2480,7 @@ async def cmd_goal(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     s = get_stats(uid)
     
     if not goal and goal_amount == 0:
-        body = tx(lang, 'goal_hdr') + '\n\n📭 ' + ('Цель не установлена. Используй /settings' if lang == 'ru' else 'Maqsad o\'rnatilmagan. /settings dan foydalaning')
+        body = tx(lang, 'goal_hdr') + '\n\n📭 ' + tx(lang, 'goal_no_set')
     else:
         lines = [tx(lang, 'goal_hdr')]
         if goal:
@@ -2545,7 +2499,8 @@ async def cmd_goal(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
             
             lines.append(tx(lang, 'goal_progress', bar=bar, pct=int(pct), saved=uzs(goal_saved), total=uzs(goal_amount), months=months if months else '?'))
         else:
-            lines.append(f"\n💰 " + ('Накоплено: ' if lang == 'ru' else 'Jamg\'arilgan: ') + uzs(goal_saved))
+            saved_lbl = tx(lang, 'saved_lbl')
+            lines.append(f"\n💰 {saved_lbl}: {uzs(goal_saved)}")
         
         body = '\n'.join(lines)
     
@@ -2596,18 +2551,18 @@ async def cmd_debts(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
             debts = c.fetchall()
 
     if not debts:
-        body = '💳 *Кредиты*\n\nАктивных кредитов нет 🎉' if lang == 'ru' else "💳 *Kreditlar*\n\nFaol kreditlar yo'q 🎉"
+        body = tx(lang, 'debt_hdr') + '\n\n' + tx(lang, 'debt_active')
     else:
-        lines = ['💳 *Кредиты:*\n' if lang == 'ru' else '💳 *Kreditlar:*\n']
+        lines = [tx(lang, 'debt_hdr') + ':']
         total = 0
         for _, bank, amount, rate, monthly, deadline in debts:
             total += amount
             lines.append(
                 f"🏦 *{bank}*\n"
-                f"  {'Долг' if lang == 'ru' else 'Qarz'}: `{uzs(amount)}`\n"
-                f"  {'Ставка' if lang == 'ru' else 'Foiz'}: {rate}%\n"
-                f"  {'Платёж/мес' if lang == 'ru' else 'Oylik'}: `{uzs(monthly)}`\n"
-                f"  {'Срок' if lang == 'ru' else 'Muddat'}: {deadline}"
+                f"  {tx(lang, 'debt_debt_lbl')}: `{uzs(amount)}`\n"
+                f"  {tx(lang, 'debt_rate_lbl')}: {rate}%\n"
+                f"  {tx(lang, 'debt_monthly_lbl')}: `{uzs(monthly)}`\n"
+                f"  {tx(lang, 'debt_deadline_lbl')}: {deadline}"
             )
             payoff_months = calc_payoff_months(amount, rate, monthly)
             if payoff_months is not None:
@@ -2621,17 +2576,19 @@ async def cmd_debts(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 month_names_uz = ['', 'Yanvar', 'Fevral', 'Mart', 'Aprel', 'May', 'Iyun', 'Iyul', 'Avgust', 'Sentabr', 'Oktabr', 'Noyabr', 'Dekabr']
                 months_names = month_names_ru if lang == 'ru' else month_names_uz
                 payoff_str = f"{months_names[payoff_date.month]} {payoff_date.year}"
-                lines.append(f"  ⏱ {'Закроешь через' if lang == 'ru' else 'Yopishga'}: ~{payoff_months} мес. ({payoff_str})")
+                close_lbl = tx(lang, 'debt_close_lbl')
+                lines.append(f"  ⏱ {close_lbl}: ~{payoff_months} мес. ({payoff_str})")
             else:
-                lines.append(f"  ⚠️ {'Платёж не покрывает проценты!' if lang == 'ru' else 'To\'lov foizlarni qoplay olmaydi!'}")
+                lines.append(tx(lang, 'debt_payoff_warn'))
             lines.append('')
-        lines.append(f"\n💰 *{'Итого' if lang == 'ru' else 'Jami'}: `{uzs(total)}`*")
+        total_lbl = tx(lang, 'debt_total_lbl')
+        lines.append(f"\n💰 *{total_lbl}:* `{uzs(total)}`")
         body = '\n'.join(lines)
 
     kb = [
-        [InlineKeyboardButton('➕ ' + ('Добавить кредит' if lang == 'ru' else "Kredit qo'shish"),  callback_data='debt_add')],
-        [InlineKeyboardButton('💸 ' + ('Внести платёж'  if lang == 'ru' else "To'lov qilish"),    callback_data='debt_pay')],
-        [InlineKeyboardButton('🎉 ' + ('Закрыть кредит' if lang == 'ru' else "Kreditni yopish"),  callback_data='debt_close')],
+        [InlineKeyboardButton('➕ ' + tx(lang, 'debt_add_lbl'),  callback_data='debt_add')],
+        [InlineKeyboardButton('💸 ' + tx(lang, 'debt_pay_lbl'),    callback_data='debt_pay')],
+        [InlineKeyboardButton('🎉 ' + tx(lang, 'debt_close_lbl2'),  callback_data='debt_close')],
     ]
     await upd.message.reply_text(body, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
@@ -2651,7 +2608,7 @@ async def cmd_clear(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_reset(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = upd.effective_user.id
     if uid != ADMIN_ID:
-        await upd.message.reply_text('❌ Нет доступа')
+        await upd.message.reply_text(tx(upd, 'no_access'))
         return
 
     args = ctx.args
@@ -2694,10 +2651,8 @@ async def cmd_reset(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-# Max photo size: 10MB
 _MAX_PHOTO_SIZE = 10 * 1024 * 1024
 
-# ────────────────────────── PHOTO HANDLER ─────────────────────────
 async def on_photo(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = upd.effective_user.id
     lang = get_lang(uid)
@@ -2705,21 +2660,12 @@ async def on_photo(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     wait = await upd.message.reply_text(tx(lang, 'processing'), parse_mode='Markdown')
     try:
         photo     = upd.message.photo[-1]
-        # FIX #8: Check photo file size before downloading
         if photo.file_size > _MAX_PHOTO_SIZE:
-            await upd.message.reply_text(
-                '❌ Фото слишком большое (макс. 10MB). Попробуй меньшее фото.' if lang == 'ru'
-                else "❌ Rasm juda katta (maks. 10MB). Kichikroq rasm yuboring.",
-                parse_mode='Markdown'
-            )
+            msg = '❌ Фото слишком большое (макс. 10MB). Попробуй меньшее фото.' if lang == 'ru' else "❌ Rasm juda katta (maks. 10MB). Kichikroq rasm yuboring."
+            await upd.message.reply_text(msg, parse_mode='Markdown')
             return
-        # FIX: Rate limit check before AI call
         if not _check_rate_limit(uid):
-            await upd.message.reply_text(
-                '⏳ Слишком много запросов. Подожди минуту.' if lang == 'ru'
-                else "⏳ Ko'p so'rovlar. Bir daqiqa kuting.",
-                parse_mode='Markdown'
-            )
+            await upd.message.reply_text(tx(lang, 'rate_limit'), parse_mode='Markdown')
             return
 
         file_obj  = await ctx.bot.get_file(photo.file_id)
@@ -2743,12 +2689,10 @@ async def on_photo(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton(tx(lang, 'confirm_cancel'), callback_data='tx_cancel'),
     ]]
     
-    # FIX #5: Add creation timestamp for TTL check
     parsed['_created_at'] = time.time()
     ctx.user_data['pending_tx'] = parsed
     await upd.message.reply_text(card_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
-# ────────────────────────── VOICE HANDLER ─────────────────────────
 async def on_voice(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid   = upd.effective_user.id
     lang  = get_lang(uid)
@@ -2782,13 +2726,8 @@ async def on_voice(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _process_text_input(uid, upd.effective_chat.id, text_result, lang, state, upd, ctx)
         return
 
-    # FIX: Rate limit check before AI call
     if not _check_rate_limit(uid):
-        await upd.message.reply_text(
-            '⏳ Слишком много запросов. Подожди минуту.' if lang == 'ru'
-            else "⏳ Ko'p so'rovlar. Bir daqiqa kuting.",
-            parse_mode='Markdown'
-        )
+        await upd.message.reply_text(tx(lang, 'rate_limit'), parse_mode='Markdown')
         return
 
     wait2  = await upd.message.reply_text(f'🎤 _{text_result}_\n\n{tx(lang, "processing")}', parse_mode='Markdown')
@@ -2811,7 +2750,6 @@ async def on_voice(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['pending_tx'] = parsed
     await upd.message.reply_text(card_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
-# ────────────────────────── NOTIFICATION SCHEDULER ────────────────
 async def send_daily_notifications(context: ContextTypes.DEFAULT_TYPE):
     now_str = datetime.now(TZ).strftime('%H:%M')
     try:
@@ -2824,16 +2762,17 @@ async def send_daily_notifications(context: ContextTypes.DEFAULT_TYPE):
         if notify_time != now_str:
             continue
         try:
+            remind_name = name or ('друг' if lang == 'ru' else "do'st")
             await context.bot.send_message(
                 uid,
-                tx(lang, 'remind_msg', name=name or ('друг' if lang == 'ru' else 'do\'st')),
+                tx(lang, 'remind_msg', name=remind_name),
                 parse_mode='Markdown'
             )
             logger.info(f'Sent reminder to {uid}')
         except Exception as e:
             logger.warning(f'Failed to send reminder to {uid}: {e}')
 
-# ────────────────────────── FLASK DASHBOARD ───────────────────────
+# ─── FLASK DASHBOARD ────────────────────────────────────────────────
 flask_app = Flask(__name__, template_folder='templates')
 _flask_secret = os.getenv('FLASK_SECRET_KEY', '')
 if not _flask_secret:
@@ -2947,7 +2886,7 @@ def _run_flask():
     logger.info(f'Starting Flask dashboard on port {port}')
     flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
-# ────────────────────────── MAIN ──────────────────────────────────
+# ─── MAIN ─────────────────────────────────────────────────────────
 def main():
     init_db()
 
