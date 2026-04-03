@@ -32,7 +32,7 @@ OPENAI_KEY     = os.getenv('OPENAI_KEY', '')   # for Whisper voice transcription
 GROQ_KEY       = os.getenv('GROQ_KEY', '')     # for Groq Whisper — free! (preferred)
 DATABASE_URL        = os.getenv('DATABASE_URL', '')         # PostgreSQL internal URL
 DATABASE_PUBLIC_URL = os.getenv('DATABASE_PUBLIC_URL', '')  # PostgreSQL public URL (preferred)
-OR_MODEL       = os.getenv('OR_MODEL', 'anthropic/claude-sonnet-4-5')
+OR_MODEL       = os.getenv('OR_MODEL', 'anthropic/claude-sonnet-4-6')
 TZ             = ZoneInfo('Asia/Tashkent')
 ADMIN_ID       = int(os.getenv('ADMIN_USER_ID', '1326256223'))
 
@@ -74,7 +74,7 @@ ONBOARDING_TEXT_STATES = {
     STATE_NAME, STATE_INCOME_AMT, STATE_SIDE_AMT, STATE_GOAL_CUSTOM,
     STATE_NOTIFY_TIME, STATE_DEBT_COUNT, STATE_DEBT_BANK, STATE_DEBT_AMT,
     STATE_DEBT_RATE, STATE_DEBT_MONTHLY, STATE_DEBT_DEADLINE,
-    'set_name', 'set_goal', 'set_notify_time', 'debt_payment'
+    'set_name', 'set_goal', 'set_notify_time', 'debt_payment', 'set_income'
 }
 
 # Карта навигации: текущий state → предыдущий state
@@ -220,6 +220,7 @@ T = {
         'set_notify'       : '🔔 Время уведомлений',
         'set_goal'         : '🎯 Финансовая цель',
         'set_name'         : '👤 Своё имя',
+        'set_income'       : '💰 Изменить доход',
         'cancel_notify'    : '🔕 Отключить уведомления',
         'notify_disabled'  : '🔕 Уведомления отключены.',
     },
@@ -423,6 +424,19 @@ def init_db():
                 deadline TEXT,
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )''')
+            # Изменение 3: Таблица для истории чата
+            c.execute('''CREATE TABLE IF NOT EXISTS chat_history (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW()
+            )''')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_chat_history_user ON chat_history(user_id, created_at DESC)')
+            # Изменение 16: Счётчик транзакций для инсайтов
+            c.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS tx_count_since_insight INT DEFAULT 0')
+            # Изменение 22: Колонка для настроения
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_mood TEXT DEFAULT ''")
         conn.commit()
 
 def get_user(uid: int) -> dict:
@@ -556,6 +570,8 @@ def get_recent(uid: int, limit=30):
             return c.fetchall()
 
 def clear_data(uid: int):
+    # Изменение 10: Очистка chat_history
+    db_clear_chat_history(uid)
     with get_conn() as conn:
         with conn.cursor() as c:
             c.execute('DELETE FROM transactions WHERE user_id=%s', (uid,))
@@ -563,6 +579,8 @@ def clear_data(uid: int):
 
 def full_reset_user(uid: int):
     """Полный сброс пользователя: онбординг + транзакции + долги."""
+    # Изменение 10: Очистка chat_history
+    db_clear_chat_history(uid)
     with get_conn() as conn:
         with conn.cursor() as c:
             c.execute('DELETE FROM transactions WHERE user_id=%s', (uid,))
@@ -604,6 +622,56 @@ def get_all_users_list(limit=50):
                 (limit,)
             )
             return [dict(r) for r in c.fetchall()]
+
+# ────────────────────────── CHAT HISTORY (Изменение 3) ─────────────
+def db_get_chat_history(uid: int, limit: int = 20) -> list:
+    """Получить последние N сообщений истории чата из БД."""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as c:
+                c.execute(
+                    '''SELECT role, content FROM chat_history
+                       WHERE user_id=%s ORDER BY created_at DESC LIMIT %s''',
+                    (uid, limit)
+                )
+                rows = c.fetchall()
+        return [{'role': r[0], 'content': r[1]} for r in reversed(rows)]
+    except Exception as e:
+        logger.error(f'db_get_chat_history error: {e}')
+        return []
+
+
+def db_save_chat_message(uid: int, role: str, content: str):
+    """Сохранить одно сообщение в историю чата."""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as c:
+                c.execute(
+                    'INSERT INTO chat_history(user_id, role, content) VALUES(%s,%s,%s)',
+                    (uid, role, content)
+                )
+                # Удалить старые сообщения, оставить только последние 30
+                c.execute(
+                    '''DELETE FROM chat_history WHERE user_id=%s AND id NOT IN (
+                        SELECT id FROM chat_history WHERE user_id=%s
+                        ORDER BY created_at DESC LIMIT 30
+                    )''',
+                    (uid, uid)
+                )
+            conn.commit()
+    except Exception as e:
+        logger.error(f'db_save_chat_message error: {e}')
+
+
+def db_clear_chat_history(uid: int):
+    """Очистить историю чата пользователя."""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as c:
+                c.execute('DELETE FROM chat_history WHERE user_id=%s', (uid,))
+            conn.commit()
+    except Exception as e:
+        logger.error(f'db_clear_chat_history error: {e}')
 
 # ────────────────────────── CURRENCY ──────────────────────────────
 def get_rates() -> dict:
@@ -669,7 +737,7 @@ Return ONLY valid JSON, no markdown fences:
 - currency: "USD" if dollars, "RUB" if rubles, else "UZS"
 - category pick best from: 🍔 Еда, 🚗 Транспорт, 🏠 Жильё, 💊 Здоровье, 👗 Одежда, 🎮 Развлечения, 📱 Связь, 🛒 Магазин, 💡 Коммуналка, 📚 Образование, ⛽ Бензин, 💼 Бизнес, 🎁 Подарок, 💰 Зарплата, 🤝 Фриланс, 📈 Инвестиции, ❓ Другое
 - items: list of individual items if multiple mentioned, else empty list
-If text contains correction keywords (исправь/тузат/ошибся/неправильно) return:
+If text contains correction keywords (исправь/тузат/ошибся/неправильно/переписать/неверно/не так/измени/wrong/noto'g'ri/o'zgartir) return:
 {"action":"fix","amount":NEW_AMOUNT_OR_NULL,"description":"NEW_DESC_OR_NULL"}
 If text contains cancellation (отмени/отменить/bekor) return:
 {"action":"cancel"}"""
@@ -797,23 +865,31 @@ async def ai_advice(uid: int, lang: str) -> str:
         return '❌ Ошибка.' if lang == 'ru' else '❌ Xatolik.'
 
 async def ai_chat(uid: int, lang: str, text: str, context: ContextTypes.DEFAULT_TYPE = None) -> str:
-    user  = get_user(uid)
-    stats = get_stats(uid)
+    # Изменение 3.3: Использовать БД для истории чата
+    user   = get_user(uid)
+    stats  = get_stats(uid)
+    recent = get_recent(uid, limit=15)
 
     fin_ctx = (
-        f"Финансы: доходы {uzs(stats['inc'])}, расходы {uzs(stats['exp'])}, "
+        f"Финансы пользователя: доходы {uzs(stats['inc'])}, расходы {uzs(stats['exp'])}, "
         f"баланс {uzs(stats['inc'] - stats['exp'])}. "
         f"Этот месяц: доходы {uzs(stats['m_inc'])}, расходы {uzs(stats['m_exp'])}."
     )
-    sys_prompt = build_advisor_system(user, lang) + f"\n\nТекущая финансовая ситуация: {fin_ctx}"
 
-    chat_history = []
-    if context is not None:
-        chat_history = context.user_data.get('chat_history', [])
+    recent_str = ''
+    if recent:
+        recent_str = "\n\nПоследние транзакции:\n" + '\n'.join(
+            f"{'➕' if r[0] == 'inc' else '➖'} {uzs(r[1])} — {r[2]} ({r[3]})"
+            for r in recent[:15]
+        )
+
+    sys_prompt = build_advisor_system(user, lang) + f"\n\nТекущая финансовая ситуация: {fin_ctx}{recent_str}"
+
+    # Загружаем историю из БД (персистентная)
+    chat_history = db_get_chat_history(uid, limit=20)
 
     messages = [{'role': 'system', 'content': sys_prompt}]
-    for h in chat_history[-10:]:
-        messages.append(h)
+    messages.extend(chat_history)
     messages.append({'role': 'user', 'content': text})
 
     try:
@@ -824,12 +900,9 @@ async def ai_chat(uid: int, lang: str, text: str, context: ContextTypes.DEFAULT_
         )
         reply = response.choices[0].message.content.strip().replace('**', '*')
 
-        if context is not None:
-            chat_history.append({'role': 'user',      'content': text})
-            chat_history.append({'role': 'assistant', 'content': reply})
-            if len(chat_history) > 20:
-                chat_history = chat_history[-20:]
-            context.user_data['chat_history'] = chat_history
+        # Сохраняем в БД
+        db_save_chat_message(uid, 'user', text)
+        db_save_chat_message(uid, 'assistant', reply)
 
         return reply
     except Exception as e:
@@ -1603,6 +1676,65 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(tx(lang, 'notify_disabled'), parse_mode='Markdown')
         return
 
+    if data == 'set_income':
+        set_user(uid, onboarding_state='set_income')
+        await q.answer()
+        try: await q.message.delete()
+        except: pass
+        await ctx.bot.send_message(
+            chat_id,
+            '💰 Напиши новый ежемесячный доход:' if lang == 'ru'
+            else '💰 Yangi oylik daromadingizni yozing:',
+            parse_mode='Markdown'
+        )
+        return
+
+    # ─── БОЛЬШИЕ СУММЫ (Изменение 5.1) ───
+    if data == 'confirm_big_tx':
+        pending = ctx.user_data.pop('pending_tx', None)
+        if pending:
+            rates     = await asyncio.to_thread(get_rates)
+            cur       = pending.get('currency', 'UZS')
+            items_lst = pending.get('items', [])
+            items_str = json.dumps(items_lst, ensure_ascii=False) if items_lst else ''
+            add_tx(uid, pending['type'], pending['amount'],
+                   pending.get('description', ''), pending.get('category', '❓ Другое'),
+                   cur, items_str)
+            reply = fmt_tx_msg(pending, lang, rates) + maybe_motivate(lang)
+            await q.answer('✅')
+            await q.edit_message_text(reply, parse_mode='Markdown')
+        else:
+            await q.answer('❌ Данные потеряны' if lang == 'ru' else "❌ Ma'lumot yo'qoldi")
+        return
+
+    if data == 'cancel_big_tx':
+        ctx.user_data.pop('pending_tx', None)
+        await q.answer()
+        await q.edit_message_text('❌ Отменено.' if lang == 'ru' else '❌ Bekor qilindi.')
+        return
+
+    # ─── MOOD CHECKIN (Изменение 21) ───
+    if data in ('mood_good', 'mood_ok', 'mood_bad'):
+        mood_map = {'mood_good': 'хорошо', 'mood_ok': 'нормально', 'mood_bad': 'тяжело'}
+        mood = mood_map[data]
+        set_user(uid, last_mood=mood)
+        ctx.user_data['last_mood'] = mood
+
+        prompt = (
+            f"Пользователь сказал что чувствует себя финансово: {mood}.\n"
+            f"Ответь коротко (2-3 предложения) — поддержи, прими, если тяжело — вдохнови. "
+            f"Говори как близкий человек. Язык: {'русский' if lang == 'ru' else 'узбекский'}."
+        )
+        sys = "Ты Finora — финансовый друг. Говоришь тепло и искренне."
+        try:
+            reply = await asyncio.to_thread(_chat, sys, prompt, 200)
+        except Exception:
+            reply = '💙' + ('Спасибо что поделился!' if lang == 'ru' else 'Ulashganingiz uchun rahmat!')
+
+        await q.answer()
+        await q.edit_message_text(reply, parse_mode='Markdown')
+        return
+
     await q.answer()
 
 # ────────────────────────── TEXT HANDLER ──────────────────────────
@@ -1842,6 +1974,22 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
         await upd.message.reply_text('❌ Формат: *20:30*' if lang == 'ru' else '❌ Format: *20:30*', parse_mode='Markdown')
         return
 
+    elif state == 'set_income':
+        try:
+            cleaned = text.replace(' ', '').replace(',', '.').replace("so'm", '').replace('сум', '').replace('$', '')
+            new_income = float(cleaned)
+            set_user(uid, income_amt=new_income, onboarding_state=STATE_DONE)
+            await upd.message.reply_text(
+                f"✅ Доход обновлён: `{uzs(new_income)}`" if lang == 'ru' else f"✅ Daromad yangilandi: `{uzs(new_income)}`",
+                parse_mode='Markdown'
+            )
+        except Exception:
+            await upd.message.reply_text(
+                '❌ Напиши число, например: *3000000*' if lang == 'ru' else '❌ Raqam yozing, masalan: *3000000*',
+                parse_mode='Markdown'
+            )
+        return
+
     # ─── MAIN TRANSACTION (STATE_DONE) ───
     else:
         u3 = get_user(uid)
@@ -1859,7 +2007,8 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
             pass
 
         if not parsed:
-            await upd.message.reply_text(tx(lang, 'parse_error'), parse_mode='Markdown')
+            reply = await ai_chat(uid, lang, text, ctx)
+            await upd.message.reply_text(reply, parse_mode='Markdown')
             return
 
         action = parsed.get('action')
@@ -1876,8 +2025,19 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
             if not last:
                 await upd.message.reply_text(tx(lang, 'no_data'), parse_mode='Markdown')
                 return
-            update_tx(last[0], amount=parsed.get('amount'), description=parsed.get('description'))
-            await upd.message.reply_text(tx(lang, 'fixed'), parse_mode='Markdown')
+            old_amount = last[2]
+            old_desc   = last[3]
+            new_amount = parsed.get('amount')
+            new_desc   = parsed.get('description')
+            update_tx(last[0], amount=new_amount, description=new_desc)
+
+            lines = ['✅ *Исправила!*\n' if lang == 'ru' else '✅ *Tuzatdim!*\n']
+            if new_amount is not None and new_amount != old_amount:
+                lines.append(f"💰 {'Сумма' if lang == 'ru' else 'Miqdor'}: `{uzs(old_amount)}` → `{uzs(new_amount)}`")
+            if new_desc is not None and new_desc != old_desc:
+                lines.append(f"📝 {'Описание' if lang == 'ru' else 'Tavsif'}: _{old_desc}_ → _{new_desc}_")
+
+            await upd.message.reply_text('\n'.join(lines), parse_mode='Markdown')
             return
 
         if 'type' not in parsed or 'amount' not in parsed:
@@ -1892,8 +2052,39 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
                parsed.get('description', ''), parsed.get('category', '❓ Другое'),
                cur, items_str)
 
+        # Изменение 5: Проверка на подозрительно большую сумму
+        u3_income = u3.get('income_amt', 0) or 0
+        if u3_income > 0 and parsed['amount'] > u3_income * 3 and parsed['type'] == 'exp':
+            # Сохранить pending транзакцию в user_data для подтверждения
+            if ctx is not None:
+                ctx.user_data['pending_tx'] = parsed
+            cur_symbol = '$' if parsed.get('currency') == 'USD' else ("₽" if parsed.get('currency') == 'RUB' else "so'm")
+            confirm_msg = (
+                f"⚠️ *Большая сумма!*\n\n"
+                f"Ты уверен что потратил `{parsed['amount']:,.0f} {cur_symbol}`?\n\n"
+                f"Это больше твоего месячного дохода в 3 раза."
+                if lang == 'ru' else
+                f"⚠️ *Katta miqdor!*\n\n"
+                f"`{parsed['amount']:,.0f} {cur_symbol}` sarflaganingizga ishonchingiz komilmi?\n\n"
+                f"Bu oylik daromadingizdan 3 baravar ko'p."
+            )
+            kb = [[
+                InlineKeyboardButton('✅ Да, записать' if lang == 'ru' else "✅ Ha, yozish", callback_data='confirm_big_tx'),
+                InlineKeyboardButton('❌ Отмена' if lang == 'ru' else '❌ Bekor', callback_data='cancel_big_tx'),
+            ]]
+            await upd.message.reply_text(confirm_msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+            return
+
         reply = fmt_tx_msg(parsed, lang, rates) + maybe_motivate(lang)
         await upd.message.reply_text(reply, parse_mode='Markdown')
+
+        # Изменение 6: Если в сообщении есть вопрос — дополнительно ответить через AI
+        question_markers = ['?', '??', 'почему', 'как', 'много', 'мало', 'нормально', 'стоит', 'советуешь',
+                            'nima', 'qanday', 'ko\'p', 'oz', 'normal', 'maslahat']
+        text_lower = text.lower()
+        if any(m in text_lower for m in question_markers):
+            ai_reply = await ai_chat(uid, lang, text, ctx)
+            await upd.message.reply_text(ai_reply, parse_mode='Markdown')
 
 
 # ────────────────────────── COMMAND HANDLERS ──────────────────────
@@ -2030,6 +2221,7 @@ async def cmd_settings(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(tx(lang, 'set_notify'),     callback_data='set_notify')],
         [InlineKeyboardButton(tx(lang, 'set_goal'),       callback_data='set_goal')],
         [InlineKeyboardButton(tx(lang, 'set_name'),       callback_data='set_name')],
+        [InlineKeyboardButton(tx(lang, 'set_income'),     callback_data='set_income')],
         [InlineKeyboardButton(tx(lang, 'cancel_notify'),  callback_data='cancel_notify')],
     ]
     await upd.message.reply_text(
@@ -2261,6 +2453,188 @@ async def send_daily_notifications(context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f'Failed to send reminder to {uid}: {e}')
 
 
+# ────────────────────────── WEEKLY SUMMARY (Изменение 9) ───────────
+async def send_weekly_summary(context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет еженедельный отчёт по воскресеньям в 20:00."""
+    now = datetime.now(TZ)
+    if now.weekday() != 6 or now.hour != 20 or now.minute != 0:
+        return
+    try:
+        users = get_all_users_with_notify()
+    except Exception as e:
+        logger.error(f'Weekly summary fetch error: {e}')
+        return
+
+    for uid, name, lang, _ in users:
+        try:
+            stats = get_stats(uid)
+            if stats['count'] == 0:
+                continue
+            bal = stats['m_inc'] - stats['m_exp']
+            bal_str = f"+{uzs(bal)}" if bal >= 0 else f"-{uzs(abs(bal))}"
+
+            top_cats = ''
+            if stats['cats']:
+                top_cats = ('\n\n📊 *Топ расходов месяца:*\n' if lang == 'ru' else '\n\n📊 *Bu oy top xarajatlar:*\n')
+                for i, (cat, amt) in enumerate(stats['cats'][:3], 1):
+                    top_cats += f"  {i}. {cat}: `{uzs(amt)}`\n"
+
+            msg = (
+                f"📊 *{name}, вот твой недельный итог!*\n\n"
+                f"Этот месяц:\n"
+                f"📈 Доходы: `{uzs(stats['m_inc'])}`\n"
+                f"📉 Расходы: `{uzs(stats['m_exp'])}`\n"
+                f"💰 Баланс: `{bal_str}`"
+                f"{top_cats}\n"
+                f"_Продолжай записывать — ты движешься к цели!_ 🚀"
+                if lang == 'ru' else
+                f"📊 *{name}, haftalik natijangiz!*\n\n"
+                f"Bu oy:\n"
+                f"📈 Daromad: `{uzs(stats['m_inc'])}`\n"
+                f"📉 Xarajat: `{uzs(stats['m_exp'])}`\n"
+                f"💰 Balans: `{bal_str}`"
+                f"{top_cats}\n"
+                f"_Yozishda davom eting — maqsadga yaqinlashyapsiz!_ 🚀"
+            )
+
+            await context.bot.send_message(uid, msg, parse_mode='Markdown')
+            logger.info(f'Sent weekly summary to {uid}')
+            await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.warning(f'Failed to send weekly summary to {uid}: {e}')
+
+
+# ────────────────────────── MORNING GREETINGS (Изменение 15) ───────
+async def generate_morning_greeting(uid: int, lang: str) -> str:
+    """Генерирует персональное утреннее пожелание через AI."""
+    user  = get_user(uid)
+    stats = get_stats(uid)
+    name  = user.get('name', 'друг' if lang == 'ru' else "do'st")
+    goal  = user.get('goal', '')
+    bal   = stats['m_inc'] - stats['m_exp']
+
+    fin_hint = ''
+    if stats['m_exp'] > 0:
+        fin_hint = f"В этом месяце потратила {uzs(stats['m_exp'])}, баланс {uzs(bal)}. " if lang == 'ru' else f"Bu oy {uzs(stats['m_exp'])} sarfladi, balans {uzs(bal)}. "
+
+    prompt = (
+        f"Напиши короткое утреннее пожелание для {name}. "
+        f"{'Цель: ' + goal + '. ' if goal else ''}"
+        f"{fin_hint}"
+        f"Требования:\n"
+        f"- Ты Финора — молодая девушка, личный финансовый друг, говоришь тепло и искренне\n"
+        f"- Как будто пишет живой человек, НЕ робот\n"
+        f"- Короткое (2-4 предложения)\n"
+        f"- Каждый раз разное настроение: иногда вдохновляющее, иногда нежное, иногда с лёгкой иронией\n"
+        f"- Упомяни имя {name}\n"
+        f"- Можно намекнуть на цель или финансы, но не навязчиво\n"
+        f"- Используй 1-2 эмодзи максимум\n"
+        f"- Язык: {'русский' if lang == 'ru' else 'узбекский'}\n"
+        f"- НЕ начинай со слова 'Доброе утро' каждый раз — варьируй приветствие"
+    )
+    sys = "Ты Финора — молодая девушка, личный финансовый друг пользователя. Пишешь тепло, по-человечески, как близкий человек. Никакого официоза, никаких шаблонов. Каждое сообщение уникальное."
+
+    try:
+        return await asyncio.to_thread(_chat, sys, prompt, 200)
+    except Exception as e:
+        logger.error(f'Morning greeting generation error: {e}')
+        return f"Доброе утро, {name} ☀️" if lang == 'ru' else f"Xayrli tong, {name} ☀️"
+
+
+async def send_morning_greetings(context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет утренние пожелания от Финоры каждый день в 8:00."""
+    now = datetime.now(TZ)
+    if now.hour != 8 or now.minute != 0:
+        return
+
+    try:
+        users = get_all_users_with_notify()
+    except Exception as e:
+        logger.error(f'Morning greeting fetch error: {e}')
+        return
+
+    for uid, name, lang, _ in users:
+        try:
+            greeting = await generate_morning_greeting(uid, lang)
+            await context.bot.send_message(uid, greeting, parse_mode='Markdown')
+            logger.info(f'Sent morning greeting to {uid}')
+            await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.warning(f'Failed to send morning greeting to {uid}: {e}')
+
+
+# ────────────────────────── WEEKLY EDUCATION (Изменение 20) ───────
+async def send_weekly_education(context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет персональный образовательный совет каждую среду в 12:00."""
+    now = datetime.now(TZ)
+    if now.weekday() != 2 or now.hour != 12 or now.minute != 0:
+        return
+
+    try:
+        users = get_all_users_with_notify()
+    except Exception as e:
+        logger.error(f'Education fetch error: {e}')
+        return
+
+    for uid, name, lang, _ in users:
+        try:
+            u      = get_user(uid)
+            stats  = get_stats(uid)
+            income = u.get('income_amt', 0)
+            goal   = u.get('goal', '')
+
+            prompt = (
+                f"Напиши один короткий (3-4 предложения) финансовый совет или факт для {name}.\n"
+                f"Их ситуация: доход {uzs(income)}/мес, расходы этого месяца {uzs(stats['m_exp'])}, цель: {goal or 'не задана'}.\n\n"
+                f"Требования:\n"
+                f"- Привязан к их реальной ситуации, не абстрактный\n"
+                f"- Конкретный инструмент для Узбекистана (депозиты, UZSE, золото и т.д.)\n"
+                f"- Говоришь как умная подруга, не как учебник\n"
+                f"- Язык: {'русский' if lang == 'ru' else 'узбекский'}"
+            )
+            sys = "Ты Финора — финансовый советник. Учишь ненавязчиво, конкретно, по-дружески."
+
+            tip = await asyncio.to_thread(_chat, sys, prompt, 250)
+            await context.bot.send_message(uid, f"📚 {tip}", parse_mode='Markdown')
+            await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.warning(f'Education send error for {uid}: {e}')
+
+
+# ────────────────────────── EMOTIONAL CHECKIN (Изменение 21) ───────
+async def send_emotional_checkin(context: ContextTypes.DEFAULT_TYPE):
+    """Раз в 14 дней спрашивает про эмоциональное состояние (1-го и 15-го в 19:00)."""
+    now = datetime.now(TZ)
+    if now.day not in (1, 15) or now.hour != 19 or now.minute != 0:
+        return
+
+    try:
+        users = get_all_users_with_notify()
+    except Exception:
+        return
+
+    for uid, name, lang, _ in users:
+        try:
+            msg = (
+                f"Привет, {name} 💙\n\n"
+                f"Как ты себя чувствуешь финансово в этом месяце?\n\n"
+                f"Это важно — я хочу понимать не только цифры, но и как ты на самом деле."
+                if lang == 'ru' else
+                f"Salom, {name} 💙\n\n"
+                f"Bu oy moliyaviy jihatdan o'zingizni qanday his qilyapsiz?\n\n"
+                f"Bu muhim — men faqat raqamlarni emas, siz haqiqatan qanday ekanligingizni bilmoqchiman."
+            )
+            kb = [[
+                InlineKeyboardButton('😊 Хорошо' if lang == 'ru' else '😊 Yaxshi',     callback_data='mood_good'),
+                InlineKeyboardButton('😐 Нормально' if lang == 'ru' else '😐 Normal',  callback_data='mood_ok'),
+                InlineKeyboardButton('😟 Тяжело' if lang == 'ru' else '😟 Qiyin',      callback_data='mood_bad'),
+            ]]
+            await context.bot.send_message(uid, msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+            await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.warning(f'Checkin send error for {uid}: {e}')
+
+
 # ────────────────────────── FLASK DASHBOARD ───────────────────────
 flask_app = Flask(__name__, template_folder='templates')
 flask_app.secret_key = os.getenv('FLASK_SECRET_KEY', 'finora-dashboard-secret-change-me')
@@ -2383,7 +2757,16 @@ def main():
 
     async def post_init(app: Application):
         await setup_bot_ui(app)
+        # Ежедневные напоминания
         app.job_queue.run_repeating(send_daily_notifications, interval=60, first=10)
+        # Еженедельный отчёт (воскресенье 20:00)
+        app.job_queue.run_repeating(send_weekly_summary, interval=60, first=30)
+        # Утренние пожелания (каждый день в 8:00)
+        app.job_queue.run_repeating(send_morning_greetings, interval=60, first=15)
+        # Образовательный совет (среда 12:00)
+        app.job_queue.run_repeating(send_weekly_education, interval=60, first=20)
+        # Психологический чекин (1 и 15 числа в 19:00)
+        app.job_queue.run_repeating(send_emotional_checkin, interval=60, first=25)
 
     app = (
         Application.builder()
