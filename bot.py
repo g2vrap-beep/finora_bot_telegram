@@ -60,6 +60,7 @@ STATE_NOTIFY_WHY  = 'notify_why'
 STATE_NOTIFY_TIME = 'notify_time'
 STATE_DONE        = 'done'
 STATE_BUG_REPORT = 'bug_report'
+STATE_GENDER     = 'gender'
 
 # ─── DEBT STATES ───
 STATE_DEBT_COUNT    = 'debt_count'
@@ -438,6 +439,8 @@ def init_db():
             c.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS tx_count_since_insight INT DEFAULT 0')
             # Колонка для настроения
             c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_mood TEXT DEFAULT ''")
+            # Колонка для пола
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS gender TEXT DEFAULT 'unknown'")
         conn.commit()
 
 def get_user(uid: int) -> dict:
@@ -857,6 +860,30 @@ async def ai_extract_name(text: str) -> str | None:
         return words[0].capitalize() if words else None
 
 
+_GENDER_SYS = """Analyze the name and determine gender.
+Return ONLY valid JSON, no markdown:
+{"gender": "male"} or {"gender": "female"} or {"gender": "unknown"}
+
+Common male names in CIS: Алишер, Бахтиёр, Шерзод, Фарход, Рустам, Камиль, Руслан, Влад, Алекс, Олег, Иван, Санжар, Жасур, Ботир, Одил, Фарход, Илхом, Шухрат, Акмал, Нодир, Бекзод, Сирож, Азиз, Зафар, Али, Бобир, Файзулло, Олим, Саид, Мухаммад, Абдулла, Комил, Нурали, Сарвар, Акбар, Равшан, Зафар, Асад, Камол, Улугбек, Азизбек, Дониёр, Жавлон, Шохруз, Исо, Элдор, Самвел, Артур, Марлен, Роланд, Максим, Дмитрий, Сергей, Андрей, Павел, Игорь, Виктор, Евгений, Артём, Даниил, Кирилл, Марат, Тимур, Ильдар, Булат, Артур, Рашид, Сабир, Самир, Ариф, Рамазан, Адам, Муслим, Азamat, Рустамбек, Жасурбек, Фарходбек
+
+Common female names in CIS: Финора, Диана, Мадина, Нигина, Шахноза, Севара, Гулнора, Мавлуда, Мукаддас, Зухра, Нилуфар, Гулсара, Хилола, Дилфуза, Наргиза, Назгул, Умеда, Дилрабо, Шоира, Гулчехра, Нилуфар, Фарида, Мастура, Тоира, Мавлюда, Ситора, Шаходат, Розия, Озода, Мадина, Сабрина, Зарина, Алина, Карина, Вика, Аня, Маша, Даша, Лилия, Виолетта, Амина, Камила, Ясмин, Алия, Гульнара, Азиза, Наргис, Малика, Самира, Тамара, Зара, Катя, Настя, Полина, Оля, Ира, Лена, Таня, Света, Юля, Галя, Надя, Люба, Валя, Зина, Rita, Sophie, Maria, Anna, Olga, Natasha, Elena, Irina, Svetlana, Tatiana, Victoria, Anastasia, Yulia, Oksana, Natalia
+
+If name is ambiguous or not in lists, return {"gender": "unknown"}"""
+
+async def ai_detect_gender(name: str) -> str:
+    """Определяет пол по имени через AI."""
+    if not name or len(name) < 2:
+        return 'unknown'
+    try:
+        raw = await asyncio.to_thread(_chat, _GENDER_SYS, f"Name: {name}", 50)
+        raw = raw.replace('```json', '').replace('```', '').strip()
+        data = json.loads(raw)
+        return data.get('gender', 'unknown')
+    except Exception as e:
+        logger.warning(f'Gender detection failed for "{name}": {e}')
+        return 'unknown'
+
+
 # ────────────────────────── ИЗМЕНЕНИЕ 2: Умный парсер чисел ────────
 async def ai_parse_number(text: str) -> float | None:
     """
@@ -1189,6 +1216,23 @@ async def send_onboarding_step(chat_id: int, uid: int, state: str, context):
         ], [back_btn]]
         await context.bot.send_message(
             chat_id, confirm_msg,
+            reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
+        )
+
+    elif state == STATE_GENDER:
+        kb = [[
+            InlineKeyboardButton('👩 Женщина' if lang == 'ru' else '👩 Ayol', callback_data='gender_female'),
+            InlineKeyboardButton('👨 Мужчина' if lang == 'ru' else '👨 Erkak', callback_data='gender_male'),
+        ], [back_btn]]
+        msg = (
+            f"✨ *{name}*, а ты кто?\n\n"
+            f"Это поможет мне общаться с тобой теплее 😊"
+            if lang == 'ru' else
+            f"✨ *{name}*, siz kimsiz?\n\n"
+            f"Bu menga siz bilan iliqroq muloqot qilishga yordam beradi 😊"
+        )
+        await context.bot.send_message(
+            chat_id, msg,
             reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
         )
 
@@ -2742,6 +2786,55 @@ async def on_voice(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not text_result:
         await upd.message.reply_text(tx(lang, 'voice_error'), parse_mode='Markdown')
         return
+
+    # ─── Если есть pending голосовая транзакция — проверить подтверждение ───
+    if ctx.user_data.get('pending_voice_tx'):
+        text_lower = text_result.lower().strip()
+
+        # Слова подтверждения
+        confirm_words = [
+            'да', 'верно', 'правильно', 'ок', 'окей', 'хорошо', 'всё верно',
+            'подтверждаю', 'записывай', 'записать', 'так', 'точно',
+            "ha", "to'g'ri", "tasdiqlash", "yozib ol", "yozish"
+        ]
+        # Слова отказа / исправления
+        fix_words = [
+            'нет', 'неверно', 'не так', 'не то', 'неправильно', 'исправь',
+            'исправить', 'ошибка', 'ошибся', 'переписать', 'измени',
+            "yo'q", "noto'g'ri", "tuzat", "xato", "o'zgartir"
+        ]
+
+        if any(w in text_lower for w in confirm_words):
+            # Подтвердить транзакцию
+            pending = ctx.user_data.pop('pending_voice_tx', None)
+            ctx.user_data.pop('pending_voice_text', None)
+            if pending:
+                rates     = await asyncio.to_thread(get_rates)
+                cur       = pending.get('currency', 'UZS')
+                items_lst = pending.get('items', [])
+                items_str = json.dumps(items_lst, ensure_ascii=False) if items_lst else ''
+                add_tx(uid, pending['type'], pending['amount'],
+                       pending.get('description', ''), pending.get('category', '❓ Другое'),
+                       cur, items_str)
+                reply = fmt_tx_msg(pending, lang, rates) + maybe_motivate(lang)
+                await upd.message.reply_text(reply, parse_mode='Markdown')
+                await maybe_send_insight(uid, lang, ctx)
+            return
+
+        if any(w in text_lower for w in fix_words):
+            # Перейти в режим исправления
+            set_user(uid, onboarding_state='voice_fix_pending')
+            await upd.message.reply_text(
+                f'🎤 _{text_result}_\n\n'
+                '✏️ *Что исправить?* Скажи или напиши:\n\n'
+                '_Например: "сумма 250000" или "категория еда"_'
+                if lang == 'ru' else
+                f'🎤 _{text_result}_\n\n'
+                '✏️ *Nimani tuzatish kerak?* Ayting yoki yozing:\n\n'
+                '_Masalan: "miqdor 250000" yoki "kategoriya ovqat"_',
+                parse_mode='Markdown'
+            )
+            return
 
     if state == STATE_BUG_REPORT:
         await handle_bug_report(upd, ctx, text_result, is_voice=True)
