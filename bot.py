@@ -751,10 +751,20 @@ Return ONLY valid JSON, no markdown fences:
 - currency: "USD" if dollars, "RUB" if rubles, else "UZS"
 - category pick best from: 🍔 Еда, 🚗 Транспорт, 🏠 Жильё, 💊 Здоровье, 👗 Одежда, 🎮 Развлечения, 📱 Связь, 🛒 Магазин, 💡 Коммуналка, 📚 Образование, ⛽ Бензин, 💼 Бизнес, 🎁 Подарок, 💰 Зарплата, 🤝 Фриланс, 📈 Инвестиции, ❓ Другое
 - items: list of individual items if multiple mentioned, else empty list
-If text contains correction keywords (исправь/тузат/ошибся/неправильно/переписать/неверно/не так/измени/wrong/noto'g'ri/o'zgartir) return:
+
+IMPORTANT RULES:
+- "взял в долг", "занял", "кредит взял", "qarz oldim", "kredit oldim" — this is EXPENSE (type:"exp"), NOT income. Category: "💳 Кредит"
+- "получил зарплату", "заработал", "пришли деньги" — this is INCOME (type:"inc")
+
+If text contains correction keywords (исправь/тузат/ошибся/неправильно/переписать/неверно/не так/измени/wrong/noto'g'ri/o'zgartir) BUT NOT about income/salary — return:
 {"action":"fix","amount":NEW_AMOUNT_OR_NULL,"description":"NEW_DESC_OR_NULL"}
-If text contains cancellation (отмени/отменить/bekor) return:
+
+If text contains "перепиши доход", "измени доход", "обнови доход", "поменяй доход", "другой доход", "мой доход", "daromadni o'zgartir", "daromad yangilash" — return:
+{"action":"update_income"}
+
+If text contains ONLY cancellation words (отмени/отменить/bekor/удали последнее) with NO other context — return:
 {"action":"cancel"}
+
 If text contains "что если", "что будет если", "если я буду", "a agar", "nima bo'ladi agar", "подсчитай сколько", return:
 {"action":"scenario","question":"original user question"}"""
 
@@ -792,8 +802,18 @@ def build_advisor_system(user: dict, lang: str) -> str:
         elif mood_uz == 'тяжело':
             mood_ctx_uz = "\n• Kayfiyat: og'ir 😟 — ayniqsa muloyim, g'amxo'rlik bilan gapir, bosim o'tkazma"
 
+        gender_uz = user.get('gender', 'unknown')
+        if gender_uz == 'male':
+            address_uz = "Foydalanuvchi erkak. Unga to'g'ri murojaat qil. O'zingdan ayol sifatida gap: 'men tushundim', 'men yozdim'."
+        elif gender_uz == 'female':
+            address_uz = "Foydalanuvchi ayol. Unga to'g'ri murojaat qil. O'zingdan ayol sifatida gap: 'men tushundim', 'men yozdim'."
+        else:
+            address_uz = "Foydalanuvchi jinsi noma'lum. Neytral shakllardan foydalaning."
+
         return (
             f"Siz Finora — {name} ning shaxsiy moliyaviy do'stisiz. "
+            f"Siz o'zingiz ayolsiz, doim ayol nomidan gapirasiz: 'men tushundim', 'men yozdim', 'men ko'rdim'.\n"
+            f"{address_uz}\n"
             f"Birgalikda moliyaviy erkinlikka intilasiz.\n\n"
             f"MA'LUMOT:\n"
             f"• Daromad: {income} {cur} ({freq})" +
@@ -804,6 +824,8 @@ def build_advisor_system(user: dict, lang: str) -> str:
             f"Siz faqat sovetchidan emas, balki samimiy do'stsiz. "
             f"O'zbek tilida gaplashing. Qisqa, amaliy, do'stona, emotsional. "
             f"Emoji ishlating 💬. Qo'llab-quvvatlang, tushunib bering, ilhomlantiring.\n\n"
+            f"BUYRUQLAR: /stats, /history, /advice, /debts, /settings (daromad, maqsad, ism o'zgartirish), /rate\n"
+            f"MUHIM: foydalanuvchi daromadini o'zgartirmoqchi bo'lsa — /settings ga yuborign. 'Qila olmayman' DEMANG.\n\n"
             f"MASLAHATLAR:\n"
             f"O'zbekiston uchun real moliyaviy vositalar: "
             f"depozitlar (Kapitalbank, Hamkorbank), UZSE aksiyalari, oltin, ko'chmas mulk."
@@ -818,8 +840,19 @@ def build_advisor_system(user: dict, lang: str) -> str:
         elif mood == 'тяжело':
             mood_ctx = '\n• Настроение: тяжёлое 😟 — говори особенно мягко, с заботой и поддержкой, без давления'
 
+        gender = user.get('gender', 'unknown')
+        if gender == 'male':
+            address_form = 'Пользователь — мужчина. Обращайся к нему: "ты потратил", "ты заработал", "ты должен". НИКОГДА не используй женский род для пользователя.'
+        elif gender == 'female':
+            address_form = 'Пользователь — женщина. Обращайся к ней: "ты потратила", "ты заработала", "ты должна".'
+        else:
+            address_form = 'Пол пользователя неизвестен — используй нейтральные формы.'
+
         return (
             f"Ты — Finora, личный финансовый друг {name}. "
+            f"Ты сама — девушка, всегда говори от женского рода: 'я поняла', 'я записала', 'я посмотрела', 'я советую'. "
+            f"НИКОГДА не пиши от мужского рода от своего лица.\n"
+            f"{address_form}\n"
             f"Вы вместе идёте к финансовой свободе.\n\n"
             f"ИНФОРМАЦИЯ О ПОЛЬЗОВАТЕЛЕ:\n"
             f"• Доход: {income} {cur} ({freq})" +
@@ -831,6 +864,10 @@ def build_advisor_system(user: dict, lang: str) -> str:
             f"Коротко, практично, по-дружески, с теплом и эмоциями. "
             f"Используй эмодзи 💬. Поддерживай, понимай, вдохновляй. "
             f"Помни контекст разговора — ты уже знаешь этого человека.\n\n"
+            f"ТВОИ КОМАНДЫ (ты умеешь это делать):\n"
+            f"• /stats — статистика, /history — история, /advice — совет\n"
+            f"• /debts — кредиты, /settings — настройки (имя, доход, цель, уведомления), /rate — курс валют\n"
+            f"ВАЖНО: если пользователь хочет изменить доход — направь его в /settings → 'Изменить доход'. НЕ говори что не можешь это сделать.\n\n"
             f"СОВЕТУЙ РЕАЛЬНЫЕ ИНСТРУМЕНТЫ ДЛЯ УЗБЕКИСТАНА:\n"
             f"Депозиты (Kapitalbank, Hamkorbank 18-22%), акции UZSE, золото, недвижимость."
         )
@@ -1170,7 +1207,7 @@ def forecast_month_end(uid: int) -> dict:
     }
 
 # ────────────────────────── FORMATTERS ────────────────────────────
-def fmt_tx_msg(parsed: dict, lang: str, rates: dict) -> str:
+def fmt_tx_msg(parsed: dict, lang: str, rates: dict, gender: str = 'unknown') -> str:
     cur   = parsed.get('currency', 'UZS')
     amt   = parsed['amount']
     sign  = '+' if parsed['type'] == 'inc' else '-'
@@ -1557,7 +1594,8 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         add_tx(uid, pending['type'], pending['amount'],
                pending.get('description', ''), pending.get('category', '❓ Другое'),
                cur, items_str)
-        reply = fmt_tx_msg(pending, lang, rates) + maybe_motivate(lang)
+        u_vc = get_user(uid)
+        reply = fmt_tx_msg(pending, lang, rates, gender=u_vc.get('gender', 'unknown')) + maybe_motivate(lang)
         await q.answer('✅')
         await q.edit_message_text(reply, parse_mode='Markdown')
         return
@@ -1974,7 +2012,8 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
             add_tx(uid, pending['type'], pending['amount'],
                    pending.get('description', ''), pending.get('category', '❓ Другое'),
                    cur, items_str)
-            reply = fmt_tx_msg(pending, lang, rates) + maybe_motivate(lang)
+            u_cb = get_user(uid)
+            reply = fmt_tx_msg(pending, lang, rates, gender=u_cb.get('gender', 'unknown')) + maybe_motivate(lang)
             await q.answer('✅')
             await q.edit_message_text(reply, parse_mode='Markdown')
         else:
@@ -2391,6 +2430,15 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
             return
 
         # ИЗМЕНЕНИЕ 7: Сценарии "а что если"
+        if action == 'update_income':
+            set_user(uid, onboarding_state='set_income')
+            await upd.message.reply_text(
+                '💰 Напиши новый ежемесячный доход:' if lang == 'ru'
+                else '💰 Yangi oylik daromadingizni yozing:',
+                parse_mode='Markdown'
+            )
+            return
+
         if action == 'scenario':
             u_sc   = get_user(uid)
             stats  = get_stats(uid)
@@ -2453,10 +2501,8 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
             await upd.message.reply_text(confirm_msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
             return
 
-        reply = fmt_tx_msg(parsed, lang, rates) + maybe_motivate(lang)
+        reply = fmt_tx_msg(parsed, lang, rates, gender=u3.get('gender', 'unknown')) + maybe_motivate(lang)
         await upd.message.reply_text(reply, parse_mode='Markdown')
-
-        # ИЗМЕНЕНИЕ 5: Проверка и отправка инсайта
         await maybe_send_insight(uid, lang, ctx)
 
         # Если в сообщении есть вопрос — дополнительно ответить через AI
@@ -2758,11 +2804,9 @@ async def on_photo(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
            parsed.get('description', ''), parsed.get('category', '🛒 Магазин'),
            cur, items_str)
 
-    reply = fmt_tx_msg(parsed, lang, rates) + maybe_motivate(lang)
+    u_photo = get_user(uid)
+    reply = fmt_tx_msg(parsed, lang, rates, gender=u_photo.get('gender', 'unknown')) + maybe_motivate(lang)
     await upd.message.reply_text(reply, parse_mode='Markdown')
-
-
-# ────────────────────────── VOICE HANDLER ─────────────────────────
 async def on_voice(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid   = upd.effective_user.id
     lang  = get_lang(uid)
@@ -2816,7 +2860,8 @@ async def on_voice(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 add_tx(uid, pending['type'], pending['amount'],
                        pending.get('description', ''), pending.get('category', '❓ Другое'),
                        cur, items_str)
-                reply = fmt_tx_msg(pending, lang, rates) + maybe_motivate(lang)
+                u_vv = get_user(uid)
+                reply = fmt_tx_msg(pending, lang, rates, gender=u_vv.get('gender', 'unknown')) + maybe_motivate(lang)
                 await upd.message.reply_text(reply, parse_mode='Markdown')
                 await maybe_send_insight(uid, lang, ctx)
             return
