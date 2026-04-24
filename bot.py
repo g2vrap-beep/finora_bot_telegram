@@ -81,8 +81,9 @@ ONBOARDING_TEXT_STATES = {
 
 # Карта навигации: текущий state → предыдущий state
 ONBOARDING_BACK_MAP = {
-    'name_confirm':  STATE_NAME,
-    STATE_INCOME_FREQ: 'name_confirm',
+    'name_confirm':    STATE_NAME,
+    STATE_GENDER:      'name_confirm',
+    STATE_INCOME_FREQ: STATE_GENDER,
     STATE_INCOME_AMT:  STATE_INCOME_FREQ,
     STATE_CURRENCY:    STATE_INCOME_AMT,
     STATE_SIDE_HUSTLE: STATE_CURRENCY,
@@ -168,6 +169,7 @@ T = {
                               '/advice — 🤖 Персональный совет\n'
                               '/rate — 💱 Курс валют\n'
                               '/settings — ⚙️ Настройки\n'
+                              '/debts — 💳 Кредиты\n'
                               '/bug — 🐛 Сообщить об ошибке\n'
                               '/help — ❓ Помощь\n\n'
                               '_Просто напиши мне — и мы начнём!_ 🚀'),
@@ -217,6 +219,7 @@ T = {
                               '/advice — 🤖 AI-совет\n'
                               '/rate — 💱 Курс валют\n'
                               '/settings — ⚙️ Настройки\n'
+                              '/debts — 💳 Кредиты\n'
                               '/clear — 🗑 Очистить данные'),
         'settings_hdr'     : '⚙️ *Настройки*\n\nЧто хочешь изменить?',
         'set_notify'       : '🔔 Время уведомлений',
@@ -288,6 +291,7 @@ T = {
                               '/advice — 🤖 Shaxsiy maslahat\n'
                               '/rate — 💱 Valyuta kursi\n'
                               '/settings — ⚙️ Sozlamalar\n'
+                              '/debts — 💳 Kreditlar\n'
                               '/bug — 🐛 Xatolik haqida xabar\n'
                               '/help — ❓ Yordam\n\n'
                               '_Menga yozing — boshlaymiz!_ 🚀'),
@@ -337,11 +341,13 @@ T = {
                               '/advice — 🤖 AI maslahat\n'
                               '/rate — 💱 Valyuta kursi\n'
                               '/settings — ⚙️ Sozlamalar\n'
+                              '/debts — 💳 Kreditlar\n'
                               '/clear — 🗑 Ma\'lumotlarni o\'chirish'),
         'settings_hdr'     : '⚙️ *Sozlamalar*\n\nNimani o\'zgartiroqsiz?',
         'set_notify'       : '🔔 Eslatma vaqti',
         'set_goal'         : '🎯 Moliyaviy maqsad',
         'set_name'         : '👤 Ismingiz',
+        'set_income'       : '💰 Daromadni o\'zgartirish',
         'cancel_notify'    : '🔕 Eslatmalarni o\'chirish',
         'notify_disabled'  : '🔕 Eslatmalar o\'chirildi.',
     }
@@ -425,6 +431,15 @@ def init_db():
                 monthly_payment FLOAT,
                 deadline TEXT,
                 created_at TIMESTAMPTZ DEFAULT NOW()
+            )''')
+            c.execute('''CREATE TABLE IF NOT EXISTS category_budgets(
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                category TEXT NOT NULL,
+                monthly_limit FLOAT NOT NULL,
+                period TEXT DEFAULT 'monthly',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(user_id, category)
             )''')
             # Таблица для истории чата
             c.execute('''CREATE TABLE IF NOT EXISTS chat_history (
@@ -637,6 +652,103 @@ def get_all_users_list(limit=50):
             )
             return [dict(r) for r in c.fetchall()]
 
+# ─────────────────── BUDGET PER CATEGORY ───────────────────
+def set_category_budget(uid: int, category: str, monthly_limit: float) -> bool:
+    """Установить месячный лимит на категорию."""
+    with get_conn() as conn:
+        with conn.cursor() as c:
+            c.execute('''
+                INSERT INTO category_budgets(user_id, category, monthly_limit)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (user_id, category) DO UPDATE SET monthly_limit = %s
+            ''', (uid, category, monthly_limit, monthly_limit))
+        conn.commit()
+    return True
+
+def get_category_budget(uid: int, category: str) -> float | None:
+    """Получить лимит на категорию."""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as c:
+                c.execute(
+                    'SELECT monthly_limit FROM category_budgets WHERE user_id=%s AND category=%s',
+                    (uid, category)
+                )
+                row = c.fetchone()
+        return float(row[0]) if row else None
+    except Exception:
+        return None
+
+def get_all_category_budgets(uid: int) -> list:
+    """Получить все лимиты пользователя."""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as c:
+                c.execute(
+                    'SELECT category, monthly_limit FROM category_budgets WHERE user_id=%s ORDER BY category',
+                    (uid,)
+                )
+                return list(c.fetchall())
+    except Exception:
+        return []
+
+def get_month_spent_by_category(uid: int, category: str) -> float:
+    """Получить сумму трат по категории за текущий месяц."""
+    month = datetime.now(TZ).strftime('%Y-%m')
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as c:
+                c.execute('''
+                    SELECT COALESCE(SUM(amount), 0) FROM transactions
+                    WHERE user_id=%s AND type='exp' AND category=%s
+                    AND TO_CHAR(created_at AT TIME ZONE 'Asia/Tashkent', 'YYYY-MM')=%s
+                ''', (uid, category, month))
+                row = c.fetchone()
+        return float(row[0]) if row else 0.0
+    except Exception:
+        return 0.0
+
+def check_budget_alert(uid: int, category: str, amount: float, lang: str = 'ru') -> str:
+    """Проверить лимит бюджета. Вернуть предупреждение или пустую строку."""
+    limit = get_category_budget(uid, category)
+    if not limit or limit <= 0:
+        return ''
+    
+    spent = get_month_spent_by_category(uid, category)
+    new_spent = spent + amount
+    ratio = new_spent / limit
+    
+    if ratio >= 1.0:
+        # Превышен лимит
+        over_by = new_spent - limit
+        if lang == 'ru':
+            return (
+                f"🚨 *ВНИМАНИЕ! Лимит превышен!*\n\n"
+                f"📊 {category}: потрачено `{uzs(new_spent)}` из `{uzs(limit)}`\n"
+                f"💸 Превышение на `{uzs(over_by)}`"
+            )
+        else:
+            return (
+                f"🚨 *DIQQAT! Limit oshildi!*\n\n"
+                f"📊 {category}: sarflangan `{uzs(new_spent)}` dan `{uzs(limit)}`\n"
+                f"💸 Oshirish `{uzs(over_by)}`"
+            )
+    elif ratio >= 0.8:
+        # Осталось меньше 20%
+        left = limit - new_spent
+        if lang == 'ru':
+            return (
+                f"⚠️ *{category} — осталось всего {uzs(left)}!*\n\n"
+                f"📊 Потрачено `{uzs(new_spent)}` из `{uzs(limit)}` ({int(ratio*100)}%)"
+            )
+        else:
+            return (
+                f"⚠️ *{category} — atigi {uzs(left)} qoldi!*\n\n"
+                f"📊 Sarflangan `{uzs(new_spent)}` dan `{uzs(limit)}` ({int(ratio*100)}%)"
+            )
+    
+    return ''
+
 # ────────────────────────── CHAT HISTORY ─────────────────────────────
 def db_get_chat_history(uid: int, limit: int = 20) -> list:
     """Получить последние N сообщений истории чата из БД."""
@@ -751,22 +863,14 @@ Return ONLY valid JSON, no markdown fences:
 - currency: "USD" if dollars, "RUB" if rubles, else "UZS"
 - category pick best from: 🍔 Еда, 🚗 Транспорт, 🏠 Жильё, 💊 Здоровье, 👗 Одежда, 🎮 Развлечения, 📱 Связь, 🛒 Магазин, 💡 Коммуналка, 📚 Образование, ⛽ Бензин, 💼 Бизнес, 🎁 Подарок, 💰 Зарплата, 🤝 Фриланс, 📈 Инвестиции, ❓ Другое
 - items: list of individual items if multiple mentioned, else empty list
-
-IMPORTANT RULES:
-- "взял в долг", "занял", "кредит взял", "qarz oldim", "kredit oldim" — this is EXPENSE (type:"exp"), NOT income. Category: "💳 Кредит"
-- "получил зарплату", "заработал", "пришли деньги" — this is INCOME (type:"inc")
-
-If text contains correction keywords (исправь/тузат/ошибся/неправильно/переписать/неверно/не так/измени/wrong/noto'g'ri/o'zgartir) BUT NOT about income/salary — return:
+If text contains correction keywords (исправь/тузат/ошибся/неправильно/переписать/неверно/не так/измени/wrong/noto'g'ri/o'zgartir) return:
 {"action":"fix","amount":NEW_AMOUNT_OR_NULL,"description":"NEW_DESC_OR_NULL"}
-
-If text contains "перепиши доход", "измени доход", "обнови доход", "поменяй доход", "другой доход", "мой доход", "daromadni o'zgartir", "daromad yangilash" — return:
-{"action":"update_income"}
-
-If text contains ONLY cancellation words (отмени/отменить/bekor/удали последнее) with NO other context — return:
+If text contains cancellation (отмени/отменить/bekor) return:
 {"action":"cancel"}
-
 If text contains "что если", "что будет если", "если я буду", "a agar", "nima bo'ladi agar", "подсчитай сколько", return:
-{"action":"scenario","question":"original user question"}"""
+{"action":"scenario","question":"original user question"}
+If text is about adding/recording a debt or loan, return {"action":"add_debt"}
+Keywords for debt: добавить кредит, записать кредит, у меня кредит, взял кредит, есть долг, новый кредит, мой кредит, кредит в банке, Капиталбанк, Хамкорбанк, Ипотека, kredit qo'sh, qarz qo'sh, kreditim bor, qarzim bor, qarzimni yoz, kredit oldim, qarz oldim, yangi kredit, kreditni qo'shmoqchiman, oylik to'lov, kredit yoz, kreditga oldim, bankdan oldim, ипотека"""
 
 _PHOTO_SYS = """Read this receipt or financial document.
 Return ONLY valid JSON:
@@ -790,6 +894,17 @@ def build_advisor_system(user: dict, lang: str) -> str:
     cur    = user.get('income_currency', 'UZS')
     side   = user.get('side_income', 0)
     freq   = user.get('income_freq', '')
+    gender = user.get('gender', 'unknown')
+
+    if lang == 'ru':
+        if gender == 'male':
+            gender_hint = '\n• Пользователь — мужчина. Обращайся к нему строго в мужском роде: потратил, заработал, добавил, сделал, купил.'
+        elif gender == 'female':
+            gender_hint = '\n• Пользователь — женщина. Обращайся к ней строго в женском роде: потратила, заработала, добавила, сделала, купила.'
+        else:
+            gender_hint = '\n• Пол пользователя неизвестен. Используй нейтральные формулировки без глаголов прошедшего времени.'
+    else:
+        gender_hint = ''  # в узбекском языке глаголы не имеют рода
 
     if lang == 'uz':
         goal_uz = goal if goal else "yo'q"
@@ -802,18 +917,8 @@ def build_advisor_system(user: dict, lang: str) -> str:
         elif mood_uz == 'тяжело':
             mood_ctx_uz = "\n• Kayfiyat: og'ir 😟 — ayniqsa muloyim, g'amxo'rlik bilan gapir, bosim o'tkazma"
 
-        gender_uz = user.get('gender', 'unknown')
-        if gender_uz == 'male':
-            address_uz = "Foydalanuvchi erkak. Unga to'g'ri murojaat qil. O'zingdan ayol sifatida gap: 'men tushundim', 'men yozdim'."
-        elif gender_uz == 'female':
-            address_uz = "Foydalanuvchi ayol. Unga to'g'ri murojaat qil. O'zingdan ayol sifatida gap: 'men tushundim', 'men yozdim'."
-        else:
-            address_uz = "Foydalanuvchi jinsi noma'lum. Neytral shakllardan foydalaning."
-
         return (
             f"Siz Finora — {name} ning shaxsiy moliyaviy do'stisiz. "
-            f"Siz o'zingiz ayolsiz, doim ayol nomidan gapirasiz: 'men tushundim', 'men yozdim', 'men ko'rdim'.\n"
-            f"{address_uz}\n"
             f"Birgalikda moliyaviy erkinlikka intilasiz.\n\n"
             f"MA'LUMOT:\n"
             f"• Daromad: {income} {cur} ({freq})" +
@@ -824,8 +929,6 @@ def build_advisor_system(user: dict, lang: str) -> str:
             f"Siz faqat sovetchidan emas, balki samimiy do'stsiz. "
             f"O'zbek tilida gaplashing. Qisqa, amaliy, do'stona, emotsional. "
             f"Emoji ishlating 💬. Qo'llab-quvvatlang, tushunib bering, ilhomlantiring.\n\n"
-            f"BUYRUQLAR: /stats, /history, /advice, /debts, /settings (daromad, maqsad, ism o'zgartirish), /rate\n"
-            f"MUHIM: foydalanuvchi daromadini o'zgartirmoqchi bo'lsa — /settings ga yuborign. 'Qila olmayman' DEMANG.\n\n"
             f"MASLAHATLAR:\n"
             f"O'zbekiston uchun real moliyaviy vositalar: "
             f"depozitlar (Kapitalbank, Hamkorbank), UZSE aksiyalari, oltin, ko'chmas mulk."
@@ -840,34 +943,20 @@ def build_advisor_system(user: dict, lang: str) -> str:
         elif mood == 'тяжело':
             mood_ctx = '\n• Настроение: тяжёлое 😟 — говори особенно мягко, с заботой и поддержкой, без давления'
 
-        gender = user.get('gender', 'unknown')
-        if gender == 'male':
-            address_form = 'Пользователь — мужчина. Обращайся к нему: "ты потратил", "ты заработал", "ты должен". НИКОГДА не используй женский род для пользователя.'
-        elif gender == 'female':
-            address_form = 'Пользователь — женщина. Обращайся к ней: "ты потратила", "ты заработала", "ты должна".'
-        else:
-            address_form = 'Пол пользователя неизвестен — используй нейтральные формы.'
-
         return (
             f"Ты — Finora, личный финансовый друг {name}. "
-            f"Ты сама — девушка, всегда говори от женского рода: 'я поняла', 'я записала', 'я посмотрела', 'я советую'. "
-            f"НИКОГДА не пиши от мужского рода от своего лица.\n"
-            f"{address_form}\n"
             f"Вы вместе идёте к финансовой свободе.\n\n"
             f"ИНФОРМАЦИЯ О ПОЛЬЗОВАТЕЛЕ:\n"
             f"• Доход: {income} {cur} ({freq})" +
             (f"\n• Доп. доход: {side} {cur}" if side else '') +
             f"\n• Финансовая цель: {goal or 'не задана'}" +
             mood_ctx +
+            gender_hint +
             f"\n\nТВОЯ РОЛЬ:\n"
             f"Ты не просто советник, а настоящий друг. Говори по-русски. "
             f"Коротко, практично, по-дружески, с теплом и эмоциями. "
             f"Используй эмодзи 💬. Поддерживай, понимай, вдохновляй. "
             f"Помни контекст разговора — ты уже знаешь этого человека.\n\n"
-            f"ТВОИ КОМАНДЫ (ты умеешь это делать):\n"
-            f"• /stats — статистика, /history — история, /advice — совет\n"
-            f"• /debts — кредиты, /settings — настройки (имя, доход, цель, уведомления), /rate — курс валют\n"
-            f"ВАЖНО: если пользователь хочет изменить доход — направь его в /settings → 'Изменить доход'. НЕ говори что не можешь это сделать.\n\n"
             f"СОВЕТУЙ РЕАЛЬНЫЕ ИНСТРУМЕНТЫ ДЛЯ УЗБЕКИСТАНА:\n"
             f"Депозиты (Kapitalbank, Hamkorbank 18-22%), акции UZSE, золото, недвижимость."
         )
@@ -1150,6 +1239,135 @@ def maybe_motivate(lang: str) -> str:
         return _random.choice(MOTIVATIONS.get(lang, MOTIVATIONS['ru']))
     return ''
 
+# ════════════════════════════════════════════════════════════════
+# 🎭 ЖИВЫЕ ЭМОЦИИ — главная фишка бота! (Русский + Узбекский)
+# ════════════════════════════════════════════════════════════════
+
+BIG_EXP_EMOTIONS = {
+    'ru': {
+        'huge': [
+            "😱 Ого, {name}! Это же огромная сумма! Ты в порядке?",
+            "🤯 {name}, {amount} за один раз! Серьёзно?",
+            "💸 {name}, такая сумма за раз... Надеюсь всё хорошо?",
+        ],
+        'big': [
+            "😮 {name}, прилично! На что-то важное?",
+            "💰 {name}, заметная сумма. Всё ок?",
+            "👀 {name}, много... Ты уверен что всё в порядке?",
+        ],
+        'small': [
+            "😊 {name}, отличный выбор! Мелочи — тоже важно!",
+            "💚 {name}, хорошо что записываешь даже мелочи!",
+            "✨ {name}, из таких покупок складывается счастье!",
+        ],
+    },
+    'uz': {
+        'huge': [
+            "😱 Voy, {name}! Bu katta suma! Yaxshimisiz?",
+            "🤯 {name}, {amount} bir martada! Rostdan ham?",
+            "💸 {name}, bu qancha pul... Hammasi yaxshimi?",
+        ],
+        'big': [
+            "😮 {name}, sezilarli! Biror muhim narsaga-mi?",
+            "💰 {name}, ko'p... Hammasi joyidami?",
+            "👀 {name}, ko'p pul... Ishonchingiz komilmi?",
+        ],
+        'small': [
+            "😊 {name}, zo'r tanlov! Maydalari ham muhim!",
+            "💚 {name}, hatto maydalarini ham yozayapsiz!",
+            "✨ {name}, shunday xarajatlardan baxt yig'iladi!",
+        ],
+    }
+}
+
+DEBT_PAY_EMOTIONS = {
+    'ru': [
+        "🎉 *{name}*, ты сделал это! Ещё один шаг к свободе!",
+        "💪 {name}, так держать! Каждый платёж приближает к цели!",
+        "⭐ {name}, серьёзный подход! Уважаю!",
+        "🔥 {name}, финансовый воин! Продолжай в том же духе!",
+        "💎 {name}, закрываем долги один за другим!",
+    ],
+    'uz': [
+        "🎉 *{name}*, buni qildingiz! Erkinlikka yana bir qadam!",
+        "💪 {name}, davom eting! Har bir to'lov maqsadga yaqinlashtiradi!",
+        "⭐ {name}, jiddiy yondashuv! Hurmat!",
+        "🔥 {name}, moliyaviy jangchi! Shunday davom eting!",
+        "💎 {name}, qarzlarni birin-ketin yopmoqdamiz!",
+    ]
+}
+
+DEBT_CLOSED_EMOTIONS = {
+    'ru': [
+        "🎉🎉🎉 *{name}*, ТЫ ЗАКРЫЛ КРЕДИТ!!! ЭТО КОСМОС!!! 💎💎💎",
+        "🥳 *{name}*, с этим кредитом покончено! Ты свободнее чем вчера!",
+        "🏆 *{name}*, вот это достижение! Кредит закрыт, ты молодец!",
+        "💎 *{name}*, один долг меньше — свободы больше! Празднуй!",
+    ],
+    'uz': [
+        "🎉🎉🎉 *{name}*, KREDIT YOPILDI!!! BU AJOYIB!!! 💎💎💎",
+        "🥳 *{name}*, bu kredit tugadi! Siz dashingiz ozodroq!",
+        "🏆 *{name}*, bu yutuq! Kredit yopildi, siz yaxshimisiz!",
+        "💎 *{name}*, bir qarz kamaydi — ozodlik ortdi! Bayram qiling!",
+    ]
+}
+
+SAVINGS_EMOTIONS = {
+    'ru': [
+        "💎 *{name}*, ты копишь! Это путь к мечте!",
+        "🏦 {name}, накопления растут! Продолжай!",
+        "🎯 {name}, каждый сэкономленный сум — это шаг к цели!",
+    ],
+    'uz': [
+        "💎 *{name}*, siz tejayapsiz! Bu orzuga olib boradi!",
+        "🏦 {name}, jamg'arma oshmoqda! Davom eting!",
+        "🎯 {name}*, har bir tejagan so'm maqsadga qadam!",
+    ]
+}
+
+def get_emotion_for_amount(uid: int, amount: float, tx_type: str, lang: str) -> str:
+    """Генерирует эмоциональную реакцию на транзакцию (Русский + Узбекский)."""
+    user = get_user(uid)
+    name = user.get('name', 'друг' if lang == 'ru' else "do'st")
+    income = user.get('income_amt', 0) or 0
+    
+    # Доходы — всегда позитив
+    if tx_type == 'inc':
+        emotions = SAVINGS_EMOTIONS.get(lang, SAVINGS_EMOTIONS['ru'])
+        emotion = _random.choice(emotions)
+        return emotion.format(name=name, amount=uzs(amount))
+    
+    # Расходы — зависит от размера относительно дохода
+    if income > 0:
+        ratio = amount / income
+        if ratio >= 3:
+            emotions = BIG_EXP_EMOTIONS.get(lang, BIG_EXP_EMOTIONS['ru'])['huge']
+        elif ratio >= 1:
+            emotions = BIG_EXP_EMOTIONS.get(lang, BIG_EXP_EMOTIONS['ru'])['big']
+        else:
+            emotions = BIG_EXP_EMOTIONS.get(lang, BIG_EXP_EMOTIONS['ru'])['small']
+    else:
+        # Нет данных о доходе — случайная позитивная реакция
+        emotions = BIG_EXP_EMOTIONS.get(lang, BIG_EXP_EMOTIONS['ru'])['small']
+    
+    emotion = _random.choice(emotions)
+    return emotion.format(name=name, amount=uzs(amount))
+
+def get_debt_pay_emotion(uid: int, lang: str) -> str:
+    """Эмоция при платеже по кредиту."""
+    user = get_user(uid)
+    name = user.get('name', 'друг' if lang == 'ru' else "do'st")
+    emotions = DEBT_PAY_EMOTIONS.get(lang, DEBT_PAY_EMOTIONS['ru'])
+    return _random.choice(emotions).format(name=name)
+
+def get_debt_closed_emotion(uid: int, lang: str) -> str:
+    """Эмоция при полном закрытии кредита."""
+    user = get_user(uid)
+    name = user.get('name', 'друг' if lang == 'ru' else "do'st")
+    emotions = DEBT_CLOSED_EMOTIONS.get(lang, DEBT_CLOSED_EMOTIONS['ru'])
+    return _random.choice(emotions).format(name=name)
+
+
 # ────────────────────────── ИЗМЕНЕНИЕ 5: Проактивные инсайты ─────
 async def maybe_send_insight(uid: int, lang: str, context: ContextTypes.DEFAULT_TYPE):
     """Отправить AI-инсайт каждые 10 транзакций."""
@@ -1171,12 +1389,20 @@ async def maybe_send_insight(uid: int, lang: str, context: ContextTypes.DEFAULT_
         f"{'доход' if r[0]=='inc' else 'расход'} {uzs(r[1])} — {r[2]} ({r[3]})"
         for r in recent
     )
+    u_insight = get_user(uid)
+    gender = u_insight.get('gender', 'unknown')
+    if gender == 'male':
+        gender_note = ' Пользователь мужчина — обращайся в мужском роде.'
+    elif gender == 'female':
+        gender_note = ' Пользователь женщина — обращайся в женском роде.'
+    else:
+        gender_note = ''
     prompt = (
         f"Проанализируй последние транзакции и найди 1-2 конкретных паттерна.\n\n"
         f"Транзакции:\n{tx_text}\n\n"
         f"Статистика месяца: доходы {uzs(stats['m_inc'])}, расходы {uzs(stats['m_exp'])}\n\n"
         f"Напиши коротко (3-4 предложения). Конкретные цифры. "
-        f"Говори как умная подруга. Язык: {'русский' if lang=='ru' else 'узбекский'}."
+        f"Говори как умная подруга.{gender_note} Язык: {'русский' if lang=='ru' else 'узбекский'}."
     )
     try:
         insight = await asyncio.to_thread(
@@ -1207,7 +1433,7 @@ def forecast_month_end(uid: int) -> dict:
     }
 
 # ────────────────────────── FORMATTERS ────────────────────────────
-def fmt_tx_msg(parsed: dict, lang: str, rates: dict, gender: str = 'unknown') -> str:
+def fmt_tx_msg(parsed: dict, lang: str, rates: dict) -> str:
     cur   = parsed.get('currency', 'UZS')
     amt   = parsed['amount']
     sign  = '+' if parsed['type'] == 'inc' else '-'
@@ -1215,8 +1441,9 @@ def fmt_tx_msg(parsed: dict, lang: str, rates: dict, gender: str = 'unknown') ->
     if lang == 'uz':
         label = tx('uz', 'type_inc') if parsed['type'] == 'inc' else tx('uz', 'type_exp')
 
+    saved_word = 'Yozib oldim' if lang == 'uz' else 'Записала'
     amt_str = fmt_amount(amt, cur, rates)
-    text = (f"✅ {'Yozib oldim' if lang == 'uz' else 'Записала'}!\n\n"
+    text = (f"✅ {saved_word}!\n\n"
             f"{label}: `{sign}{amt_str}`\n"
             f"📝 {parsed.get('description', '')}\n"
             f"🏷 {parsed.get('category', '')}")
@@ -1377,9 +1604,15 @@ async def send_onboarding_step(chat_id: int, uid: int, state: str, context):
 
     elif state == STATE_DEBT_AMT:
         kb = [[back_btn]]
+        u_debt = get_user(uid)
+        gender = u_debt.get('gender', 'unknown')
+        if gender == 'female':
+            debt_q_ru = '💵 Сколько ты должна? Напиши сумму долга:'
+        else:
+            debt_q_ru = '💵 Сколько ты должен? Напиши сумму долга:'
         await context.bot.send_message(
             chat_id,
-            '💵 Сколько ты должен? Напиши сумму долга:' if lang == 'ru'
+            debt_q_ru if lang == 'ru'
             else "💵 Qancha qarzingiz bor? Qarz miqdorini yozing:",
             reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
         )
@@ -1544,8 +1777,13 @@ async def generate_debt_strategy(uid: int, lang: str, chat_id: int, context: Con
         msg = '✅ Кредиты записаны! Стратегию смотри в /debts' if lang == 'ru' else '✅ Kreditlar yozildi! Strategiyani /debts da ko\'ring'
         await context.bot.send_message(chat_id, msg)
 
-    set_user(uid, onboarding_state=STATE_NOTIFY_WHY)
-    await send_onboarding_step(chat_id, uid, STATE_NOTIFY_WHY, context)
+    # Если пользователь уже прошёл онбординг (добавил кредиты из /settings) — просто возвращаем в STATE_DONE
+    u_check = get_user(uid)
+    if u_check.get('onboarding_done'):
+        set_user(uid, onboarding_state=STATE_DONE)
+    else:
+        set_user(uid, onboarding_state=STATE_NOTIFY_WHY)
+        await send_onboarding_step(chat_id, uid, STATE_NOTIFY_WHY, context)
 
 async def cmd_bug(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = upd.effective_user.id
@@ -1568,7 +1806,8 @@ async def setup_bot_ui(app: Application):
         BotCommand('bug', '🐛 Сообщить об ошибке'),
         BotCommand('help', '❓ Помощь'),
         BotCommand('debts', '💳 Управление кредитами'),
-        BotCommand('clear', '🗑 Очистить данные')
+        BotCommand('clear', '🗑 Очистить данные'),
+        BotCommand('budgets', '💰 Бюджет по категориям'),
     ]
     await app.bot.set_my_commands(commands)
 
@@ -1594,8 +1833,9 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         add_tx(uid, pending['type'], pending['amount'],
                pending.get('description', ''), pending.get('category', '❓ Другое'),
                cur, items_str)
-        u_vc = get_user(uid)
-        reply = fmt_tx_msg(pending, lang, rates, gender=u_vc.get('gender', 'unknown')) + maybe_motivate(lang)
+        # 🎭 ЖИВЫЕ ЭМОЦИИ для голосового подтверждения (callback)
+        emotion = get_emotion_for_amount(uid, pending['amount'], pending['type'], lang)
+        reply = fmt_tx_msg(pending, lang, rates) + maybe_motivate(lang) + f"\n\n{emotion}"
         await q.answer('✅')
         await q.edit_message_text(reply, parse_mode='Markdown')
         return
@@ -1722,11 +1962,11 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ─── NAME CONFIRM ───
     if data == 'name_ok':
-        set_user(uid, onboarding_state=STATE_INCOME_FREQ)
+        set_user(uid, onboarding_state=STATE_GENDER)
         await q.answer()
         try: await q.message.delete()
         except: pass
-        await send_onboarding_step(chat_id, uid, STATE_INCOME_FREQ, ctx)
+        await send_onboarding_step(chat_id, uid, STATE_GENDER, ctx)
         return
 
     if data == 'name_edit':
@@ -1737,7 +1977,15 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send_onboarding_step(chat_id, uid, STATE_NAME, ctx)
         return
 
-    # ─── INCOME FREQUENCY ───
+    # ─── GENDER ───
+    if data in ('gender_male', 'gender_female'):
+        gender_val = 'male' if data == 'gender_male' else 'female'
+        set_user(uid, gender=gender_val, onboarding_state=STATE_INCOME_FREQ)
+        await q.answer()
+        try: await q.message.delete()
+        except: pass
+        await send_onboarding_step(chat_id, uid, STATE_INCOME_FREQ, ctx)
+        return
     if data.startswith('freq_'):
         freq_map = {
             'freq_daily':     ('Каждый день',  'Har kun'),
@@ -2012,8 +2260,7 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
             add_tx(uid, pending['type'], pending['amount'],
                    pending.get('description', ''), pending.get('category', '❓ Другое'),
                    cur, items_str)
-            u_cb = get_user(uid)
-            reply = fmt_tx_msg(pending, lang, rates, gender=u_cb.get('gender', 'unknown')) + maybe_motivate(lang)
+            reply = fmt_tx_msg(pending, lang, rates) + maybe_motivate(lang)
             await q.answer('✅')
             await q.edit_message_text(reply, parse_mode='Markdown')
         else:
@@ -2287,11 +2534,39 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
         return
 
     elif state == 'set_goal':
-        set_user(uid, goal=text.strip(), onboarding_state=STATE_DONE)
+        goal_text = text.strip()
+        set_user(uid, goal=goal_text, onboarding_state=STATE_DONE)
         await upd.message.reply_text(
-            f"✅ Цель обновлена: _{text.strip()}_" if lang == 'ru' else f"✅ Maqsad yangilandi: _{text.strip()}_",
+            f"✅ Цель обновлена: _{goal_text}_" if lang == 'ru' else f"✅ Maqsad yangilandi: _{goal_text}_",
             parse_mode='Markdown'
         )
+        # Если цель связана с долгами — предложить добавить кредиты
+        debt_keywords = ['долг', 'кредит', 'займ', 'qarz', 'kredit']
+        if any(kw in goal_text.lower() for kw in debt_keywords):
+            with get_conn() as conn:
+                with conn.cursor() as c:
+                    c.execute('SELECT COUNT(*) FROM debts WHERE user_id=%s', (uid,))
+                    debt_count = c.fetchone()[0]
+            if debt_count == 0:
+                skip_btn = InlineKeyboardButton(
+                    '⏭ Позже' if lang == 'ru' else "⏭ Keyinroq",
+                    callback_data='debt_skip_onboarding'
+                )
+                msg = (
+                    '💳 *Отличная цель!*\n\n'
+                    'Чтобы я помогла составить план погашения, нужно знать твои кредиты.\n\n'
+                    'Сколько у тебя кредитов? Напиши число (от 1 до 50):\n\n'
+                    '_Можешь пропустить и добавить позже через /debts_'
+                    if lang == 'ru' else
+                    '💳 *Ajoyib maqsad!*\n\n'
+                    'To\'lov rejasini tuzish uchun kreditlaringizni bilishim kerak.\n\n'
+                    'Nechta kreditingiz bor? Raqam yozing (1 dan 50 gacha):\n\n'
+                    '_/debts orqali keyinroq qo\'shishingiz mumkin_'
+                )
+                await upd.message.reply_text(
+                    msg, reply_markup=InlineKeyboardMarkup([[skip_btn]]), parse_mode='Markdown'
+                )
+                set_user(uid, onboarding_state=STATE_DEBT_COUNT)
         return
 
     elif state == 'set_notify_time':
@@ -2330,8 +2605,10 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
     elif state == 'voice_fix_pending':
         pending = ctx.user_data.get('pending_voice_tx', {})
         if not pending:
-            await upd.message.reply_text(tx(lang, 'no_data'), parse_mode='Markdown')
+            # pending_voice_tx потерялся (рестарт сервера) — сбрасываем стейт
+            # и обрабатываем сообщение как обычную транзакцию
             set_user(uid, onboarding_state=STATE_DONE)
+            await _process_text_input(uid, chat_id, text, lang, STATE_DONE, upd, ctx)
             return
 
         fix_prompt = (
@@ -2404,9 +2681,41 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
 
         if action == 'cancel':
             if delete_last_tx(uid):
-                await upd.message.reply_text(tx(lang, 'cancelled'), parse_mode='Markdown')
+                msg = '🗑 Последняя транзакция удалена.' if lang == 'ru' else "🗑 Oxirgi tranzaksiya o'chirildi."
+                await upd.message.reply_text(msg, parse_mode='Markdown')
             else:
                 await upd.message.reply_text(tx(lang, 'no_data'), parse_mode='Markdown')
+            return
+
+        if action == 'add_debt':
+            set_debt_state(uid, target=1, current=0, temp={})
+            set_user(uid, onboarding_state=STATE_DEBT_BANK)
+            await upd.message.reply_text(
+                '💳 Добавляем кредит!\n\nНазвание банка или кредитора?' if lang == 'ru'
+                else "💳 Kredit qo'shamiz!\n\nBank yoki kreditor nomi?",
+                parse_mode='Markdown'
+            )
+            return
+
+        # ─── BUDGET: Установка лимита ───
+        if action == 'set_budget':
+            category = parsed.get('category', '')
+            limit    = parsed.get('amount', 0)
+            if category and limit > 0:
+                set_category_budget(uid, category, limit)
+                await upd.message.reply_text(
+                    f"✅ *Лимит установлен!*\n\n🏷 {category}\n💰 {uzs(limit)}/месяц\n\n"
+                    f"_Проверить: /budgets_" if lang == 'ru' else
+                    f"✅ *Limit o'rnatildi!*\n\n🏷 {category}\n💰 {uzs(limit)}/oyiga\n\n"
+                    f"_Tekshirish: /budgets_",
+                    parse_mode='Markdown'
+                )
+            else:
+                await upd.message.reply_text(
+                    '❌ Не поняла. Напиши: "установи лимит на еду 500 000 в месяц"' if lang == 'ru'
+                    else "❌ Tushunmadim. Yozing: \"ovqat uchun oyiga 500 000 limit qo'y\"",
+                    parse_mode='Markdown'
+                )
             return
 
         if action == 'fix':
@@ -2430,15 +2739,6 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
             return
 
         # ИЗМЕНЕНИЕ 7: Сценарии "а что если"
-        if action == 'update_income':
-            set_user(uid, onboarding_state='set_income')
-            await upd.message.reply_text(
-                '💰 Напиши новый ежемесячный доход:' if lang == 'ru'
-                else '💰 Yangi oylik daromadingizni yozing:',
-                parse_mode='Markdown'
-            )
-            return
-
         if action == 'scenario':
             u_sc   = get_user(uid)
             stats  = get_stats(uid)
@@ -2471,13 +2771,9 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
             await upd.message.reply_text(tx(lang, 'parse_error'), parse_mode='Markdown')
             return
 
-        rates     = await asyncio.to_thread(get_rates)
-        cur       = parsed.get('currency', 'UZS')
-        items_lst = parsed.get('items', [])
-        items_str = json.dumps(items_lst, ensure_ascii=False) if items_lst else ''
-        add_tx(uid, parsed['type'], parsed['amount'],
-               parsed.get('description', ''), parsed.get('category', '❓ Другое'),
-               cur, items_str)
+        if parsed.get('amount', 0) <= 0:
+            await upd.message.reply_text(tx(lang, 'parse_error'), parse_mode='Markdown')
+            return
 
         # Проверка на подозрительно большую сумму
         u3_income = u3.get('income_amt', 0) or 0
@@ -2501,8 +2797,27 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
             await upd.message.reply_text(confirm_msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
             return
 
-        reply = fmt_tx_msg(parsed, lang, rates, gender=u3.get('gender', 'unknown')) + maybe_motivate(lang)
+        rates     = await asyncio.to_thread(get_rates)
+        cur       = parsed.get('currency', 'UZS')
+        items_lst = parsed.get('items', [])
+        items_str = json.dumps(items_lst, ensure_ascii=False) if items_lst else ''
+        add_tx(uid, parsed['type'], parsed['amount'],
+               parsed.get('description', ''), parsed.get('category', '❓ Другое'),
+               cur, items_str)
+
+        # ─── BUDGET ALERT: проверка лимитов ───
+        budget_alert = ''
+        if parsed['type'] == 'exp' and parsed.get('category'):
+            budget_alert = check_budget_alert(uid, parsed['category'], parsed['amount'], lang)
+
+        # 🎭 ЖИВЫЕ ЭМОЦИИ — реагируем на каждую транзакцию!
+        emotion = get_emotion_for_amount(uid, parsed['amount'], parsed['type'], lang)
+        reply = fmt_tx_msg(parsed, lang, rates) + maybe_motivate(lang) + f"\n\n{emotion}"
+        if budget_alert:
+            reply += f"\n\n{budget_alert}"
         await upd.message.reply_text(reply, parse_mode='Markdown')
+
+        # ИЗМЕНЕНИЕ 5: Проверка и отправка инсайта
         await maybe_send_insight(uid, lang, ctx)
 
         # Если в сообщении есть вопрос — дополнительно ответить через AI
@@ -2727,6 +3042,59 @@ async def cmd_clear(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_budgets(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Показать все бюджеты по категориям."""
+    uid  = upd.effective_user.id
+    lang = get_lang(uid)
+
+    budgets = get_all_category_budgets(uid)
+
+    if not budgets:
+        msg = (
+            '💰 *Твои лимиты расходов*\n\n'
+            'Пока нет лимитов 📭\n\n'
+            '_Напиши мне: "установи лимит на еду 500 000 в месяц" — и я создам!_'
+            if lang == 'ru' else
+            "💰 *Xarajat limitlaringiz*\n\n"
+            "Hali limit yo'q 📭\n\n"
+            '_Menga yozing: "ovqat uchun oyiga 500 000 limit qo'y" — men yarataman!_'"
+        )
+        await upd.message.reply_text(msg, parse_mode='Markdown')
+        return
+
+    lines = ['💰 *Твои лимиты расходов:*\n' if lang == 'ru' else "💰 *Xarajat limitlaringiz:*\n"]
+    for cat, limit in budgets:
+        spent = get_month_spent_by_category(uid, cat)
+        ratio = spent / limit if limit > 0 else 0
+        pct = min(int(ratio * 100), 100)
+
+        bar = '█' * (pct // 10) + '░' * (10 - pct // 10)
+        spent_str = uzs(spent)
+        limit_str = uzs(limit)
+        left = limit - spent
+        left_str = uzs(left)
+
+        if ratio >= 1.0:
+            status = '🚨' if lang == 'ru' else '🚨'
+            status_text = '⚠️ ПРЕВЫШЕН!' if lang == 'ru' else "⚠️ OSHILDI!"
+        elif ratio >= 0.8:
+            status = '⚠️'
+            status_text = f'Осталось {left_str}' if lang == 'ru' else f'Qoldi {left_str}'
+        else:
+            status = '✅'
+            status_text = f'Осталось {left_str}' if lang == 'ru' else f'Qoldi {left_str}'
+
+        lines.append(
+            f"{cat}\n"
+            f"  [{bar}] {pct}%\n"
+            f"  📊 {spent_str} / {limit_str}\n"
+            f"  {status} {status_text}\n"
+        )
+
+    lines.append('\n_Изменить лимит: "установи лимит на категорию 300 000"_')
+    await upd.message.reply_text('\n'.join(lines), parse_mode='Markdown')
+
+
 async def cmd_reset(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Admin: сбросить данные пользователя. Только для ADMIN_ID."""
     uid = upd.effective_user.id
@@ -2804,9 +3172,20 @@ async def on_photo(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
            parsed.get('description', ''), parsed.get('category', '🛒 Магазин'),
            cur, items_str)
 
-    u_photo = get_user(uid)
-    reply = fmt_tx_msg(parsed, lang, rates, gender=u_photo.get('gender', 'unknown')) + maybe_motivate(lang)
+    # ─── BUDGET ALERT: проверка лимитов ───
+    budget_alert = ''
+    if parsed['type'] == 'exp' and parsed.get('category'):
+        budget_alert = check_budget_alert(uid, parsed['category'], parsed['amount'], lang)
+
+    # 🎭 ЖИВЫЕ ЭМОЦИИ для фото чеков
+    emotion = get_emotion_for_amount(uid, parsed['amount'], parsed['type'], lang)
+    reply = fmt_tx_msg(parsed, lang, rates) + maybe_motivate(lang) + f"\n\n{emotion}"
+    if budget_alert:
+        reply += f"\n\n{budget_alert}"
     await upd.message.reply_text(reply, parse_mode='Markdown')
+
+
+# ────────────────────────── VOICE HANDLER ─────────────────────────
 async def on_voice(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid   = upd.effective_user.id
     lang  = get_lang(uid)
@@ -2860,8 +3239,9 @@ async def on_voice(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 add_tx(uid, pending['type'], pending['amount'],
                        pending.get('description', ''), pending.get('category', '❓ Другое'),
                        cur, items_str)
-                u_vv = get_user(uid)
-                reply = fmt_tx_msg(pending, lang, rates, gender=u_vv.get('gender', 'unknown')) + maybe_motivate(lang)
+                # 🎭 ЖИВЫЕ ЭМОЦИИ для голоса
+                emotion = get_emotion_for_amount(uid, pending['amount'], pending['type'], lang)
+                reply = fmt_tx_msg(pending, lang, rates) + maybe_motivate(lang) + f"\n\n{emotion}"
                 await upd.message.reply_text(reply, parse_mode='Markdown')
                 await maybe_send_insight(uid, lang, ctx)
             return
@@ -3013,10 +3393,21 @@ async def generate_morning_greeting(uid: int, lang: str) -> str:
     name  = user.get('name', 'друг' if lang == 'ru' else "do'st")
     goal  = user.get('goal', '')
     bal   = stats['m_inc'] - stats['m_exp']
+    gender = user.get('gender', 'unknown')
+
+    if lang == 'ru':
+        if gender == 'male':
+            gender_line = '- Пользователь мужчина, обращайся к нему в мужском роде\n'
+        elif gender == 'female':
+            gender_line = '- Пользователь женщина, обращайся к ней в женском роде\n'
+        else:
+            gender_line = '- Пол неизвестен, избегай глаголов прошедшего времени\n'
+    else:
+        gender_line = ''
 
     fin_hint = ''
     if stats['m_exp'] > 0:
-        fin_hint = f"В этом месяце потратила {uzs(stats['m_exp'])}, баланс {uzs(bal)}. " if lang == 'ru' else f"Bu oy {uzs(stats['m_exp'])} sarfladi, balans {uzs(bal)}. "
+        fin_hint = f"В этом месяце потратил(а) {uzs(stats['m_exp'])}, баланс {uzs(bal)}. " if lang == 'ru' else f"Bu oy {uzs(stats['m_exp'])} sarfladi, balans {uzs(bal)}. "
 
     prompt = (
         f"Напиши короткое утреннее пожелание для {name}. "
@@ -3031,7 +3422,8 @@ async def generate_morning_greeting(uid: int, lang: str) -> str:
         f"- Можно намекнуть на цель или финансы, но не навязчиво\n"
         f"- Используй 1-2 эмодзи максимум\n"
         f"- Язык: {'русский' if lang == 'ru' else 'узбекский'}\n"
-        f"- НЕ начинай со слова 'Доброе утро' каждый раз — варьируй приветствие"
+        f"- НЕ начинай со слова 'Доброе утро' каждый раз — варьируй приветствие\n"
+        f"{gender_line}"
     )
     sys = "Ты Финора — молодая девушка, личный финансовый друг пользователя. Пишешь тепло, по-человечески, как близкий человек. Никакого официоза, никаких шаблонов. Каждое сообщение уникальное."
 
@@ -3082,6 +3474,13 @@ async def send_weekly_education(context: ContextTypes.DEFAULT_TYPE):
             stats  = get_stats(uid)
             income = u.get('income_amt', 0)
             goal   = u.get('goal', '')
+            gender = u.get('gender', 'unknown')
+            if gender == 'male':
+                gender_edu = ' Пользователь мужчина — обращайся в мужском роде.'
+            elif gender == 'female':
+                gender_edu = ' Пользователь женщина — обращайся в женском роде.'
+            else:
+                gender_edu = ''
 
             prompt = (
                 f"Напиши один короткий (3-4 предложения) финансовый совет или факт для {name}.\n"
@@ -3090,7 +3489,8 @@ async def send_weekly_education(context: ContextTypes.DEFAULT_TYPE):
                 f"- Привязан к их реальной ситуации, не абстрактный\n"
                 f"- Конкретный инструмент для Узбекистана (депозиты, UZSE, золото и т.д.)\n"
                 f"- Говоришь как умная подруга, не как учебник\n"
-                f"- Язык: {'русский' if lang == 'ru' else 'узбекский'}"
+                f"- Язык: {'русский' if lang == 'ru' else 'узбекский'}\n"
+                f"- {gender_edu}"
             )
             sys = "Ты Финора — финансовый советник. Учишь ненавязчиво, конкретно, по-дружески."
 
@@ -3159,9 +3559,15 @@ async def send_debt_reminders(context: ContextTypes.DEFAULT_TYPE):
 
     for uid, name, lang in users:
         try:
+            u_obj = get_user(uid)
+            gender = u_obj.get('gender', 'unknown')
+            if gender == 'female':
+                v1, v2 = 'добавила', 'должна'
+            else:
+                v1, v2 = 'добавил', 'должен'
             msg = (
-                f"💳 *{name}*, ты ещё не добавила свои кредиты!\n\n"
-                f"Твоя цель — закрыть долги, но я не знаю сколько ты должна. "
+                f"💳 *{name}*, ты ещё не {v1} свои кредиты!\n\n"
+                f"Твоя цель — закрыть долги, но я не знаю сколько ты {v2}. "
                 f"Без этого не смогу помочь составить план 🙏\n\n"
                 f"Зайди в /debts — займёт буквально 2 минуты."
                 if lang == 'ru' else
@@ -3192,8 +3598,8 @@ def _verify_telegram_webapp(init_data: str) -> int | None:
         data_check_string = '\n'.join(data_check_arr)
 
         secret_key = hmac.new(
-            b'WebAppData',
             BOT_TOKEN.encode(),
+            b'WebAppData',
             hashlib.sha256
         ).digest()
         computed = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
