@@ -3057,7 +3057,7 @@ async def cmd_budgets(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if lang == 'ru' else
             '💰 *Xarajat limitlaringiz*\n\n'
             "Hali limit yo'q 📭\n\n"
-            '_Menga yozing: "ovqat uchun oyiga 500 000 limit qo'y" — men yarataman!_'
+            "_Menga yozing: \"ovqat uchun oyiga 500 000 limit qo'y\" — men yarataman!_"
         )
         await upd.message.reply_text(msg, parse_mode='Markdown')
         return
