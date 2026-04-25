@@ -2515,6 +2515,38 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
         return
 
     elif state == STATE_GOAL_CUSTOM:
+        # Проверяем: не похоже ли сообщение на команду транзакции, а не на цель
+        _tx_cmd_words = [
+            'добавь', 'запиши', 'потратил', 'потратила', 'купил', 'купила',
+            'заработал', 'заработала', 'транзакцию', 'расход', 'доход',
+            'на карте', 'на счёт', 'qo\'sh', 'yoz', 'oldim', 'sotib',
+        ]
+        _text_lower = text.lower()
+        _has_number = any(ch.isdigit() for ch in text)
+        _looks_like_tx = _has_number and any(w in _text_lower for w in _tx_cmd_words)
+
+        if _looks_like_tx:
+            if lang == 'ru':
+                await upd.message.reply_text(
+                    '😊 Похоже, ты пытаешься добавить транзакцию — но сейчас я жду твою *финансовую цель*.\n\n'
+                    'Напиши что-то вроде:\n'
+                    '• _"Накопить на машину"_\n'
+                    '• _"Не жить от зарплаты до зарплаты"_\n'
+                    '• _"Поехать в отпуск"_\n\n'
+                    'Транзакцию сможешь добавить сразу после регистрации 💎',
+                    parse_mode='Markdown'
+                )
+            else:
+                await upd.message.reply_text(
+                    '😊 Tranzaksiya qo\'shmoqchi ko\'rinasiz — lekin hozir men sizning *moliyaviy maqsadingizni* kutmoqdaman.\n\n'
+                    'Masalan:\n'
+                    '• _"Mashina uchun yig\'ish"_\n'
+                    '• _"Ta\'tilga borish"_\n\n'
+                    'Tranzaksiyani ro\'yxatdan o\'tgandan keyin qo\'shishingiz mumkin 💎',
+                    parse_mode='Markdown'
+                )
+            return
+
         set_user(uid, goal=text.strip(), onboarding_state=STATE_NOTIFY_WHY)
         await send_onboarding_step(chat_id, uid, STATE_NOTIFY_WHY, ctx)
         return
@@ -2760,10 +2792,11 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
                 await upd.message.reply_text(msg, parse_mode='Markdown')
             return
 
-        # ── BUG 2: no_amount — AI вернул действие без суммы ──
+        # ── FIX 2: no_amount — короткий ответ, возможно реакция на вопрос бота ──
         if action == 'no_amount':
-            # Возможно пользователь пишет категорию к предыдущей транзакции — игнорируем
-            await upd.message.reply_text(tx(lang, 'parse_error'), parse_mode='Markdown')
+            # Отправляем в ai_chat: может это ответ на вопрос Финоры ("да", "работаю" и т.д.)
+            reply = await ai_chat(uid, lang, text, ctx)
+            await upd.message.reply_text(reply, parse_mode='Markdown')
             return
 
         if action == 'add_debt':
@@ -2894,20 +2927,16 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
         reply = fmt_tx_msg(parsed, lang, rates) + maybe_motivate(lang) + f"\n\n{emotion}"
         if budget_alert:
             reply += f"\n\n{budget_alert}"
-        await upd.message.reply_text(reply, parse_mode='Markdown')
 
-        # ИЗМЕНЕНИЕ 5: Проверка и отправка инсайта
-        await maybe_send_insight(uid, lang, ctx)
-
-        # ── BUG 6: Добавить кнопку отмены после транзакции ──
+        # ── FIX 3: кнопка отмены объединена с основным сообщением ──
         undo_kb = [[InlineKeyboardButton(
             '🗑 Отменить запись' if lang == 'ru' else "🗑 Yozuvni bekor qilish",
             callback_data='undo_last_tx'
         )]]
-        await upd.message.reply_text(
-            tx(lang, 'added') + ' ' + (tx(lang, 'cancelled') if lang == 'uz' else ''),
-            reply_markup=InlineKeyboardMarkup(undo_kb)
-        )
+        await upd.message.reply_text(reply, reply_markup=InlineKeyboardMarkup(undo_kb), parse_mode='Markdown')
+
+        # Проверка и отправка инсайта
+        await maybe_send_insight(uid, lang, ctx)
 
         # ── BUG 5: Используем regex для точного поиска целых слов ──
         import re as _re_qmark
@@ -3302,55 +3331,61 @@ async def on_voice(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # ─── Если есть pending голосовая транзакция — проверить подтверждение ───
+    # FIX 5: если pending_voice_tx некорректный (рестарт сервера) — сбрасываем и идём дальше
     if ctx.user_data.get('pending_voice_tx'):
-        text_lower = text_result.lower().strip()
-
-        # Слова подтверждения
-        confirm_words = [
-            'да', 'верно', 'правильно', 'ок', 'окей', 'хорошо', 'всё верно',
-            'подтверждаю', 'записывай', 'записать', 'так', 'точно',
-            "ha", "to'g'ri", "tasdiqlash", "yozib ol", "yozish"
-        ]
-        # Слова отказа / исправления
-        fix_words = [
-            'нет', 'неверно', 'не так', 'не то', 'неправильно', 'исправь',
-            'исправить', 'ошибка', 'ошибся', 'переписать', 'измени',
-            "yo'q", "noto'g'ri", "tuzat", "xato", "o'zgartir"
-        ]
-
-        if any(w in text_lower for w in confirm_words):
-            # Подтвердить транзакцию
-            pending = ctx.user_data.pop('pending_voice_tx', None)
+        pending_check = ctx.user_data['pending_voice_tx']
+        if not isinstance(pending_check, dict) or 'amount' not in pending_check:
+            ctx.user_data.pop('pending_voice_tx', None)
             ctx.user_data.pop('pending_voice_text', None)
-            if pending:
-                rates     = await asyncio.to_thread(get_rates)
-                cur       = pending.get('currency', 'UZS')
-                items_lst = pending.get('items', [])
-                items_str = json.dumps(items_lst, ensure_ascii=False) if items_lst else ''
-                add_tx(uid, pending['type'], pending['amount'],
-                       pending.get('description', ''), pending.get('category', '❓ Другое'),
-                       cur, items_str)
-                # 🎭 ЖИВЫЕ ЭМОЦИИ для голоса
-                emotion = get_emotion_for_amount(uid, pending['amount'], pending['type'], lang)
-                reply = fmt_tx_msg(pending, lang, rates) + maybe_motivate(lang) + f"\n\n{emotion}"
-                await upd.message.reply_text(reply, parse_mode='Markdown')
-                await maybe_send_insight(uid, lang, ctx)
-            return
+        else:
+            text_lower = text_result.lower().strip()
 
-        if any(w in text_lower for w in fix_words):
-            # Перейти в режим исправления
-            set_user(uid, onboarding_state='voice_fix_pending')
-            await upd.message.reply_text(
-                f'🎤 _{text_result}_\n\n'
-                '✏️ *Что исправить?* Скажи или напиши:\n\n'
-                '_Например: "сумма 250000" или "категория еда"_'
-                if lang == 'ru' else
-                f'🎤 _{text_result}_\n\n'
-                '✏️ *Nimani tuzatish kerak?* Ayting yoki yozing:\n\n'
-                '_Masalan: "miqdor 250000" yoki "kategoriya ovqat"_',
-                parse_mode='Markdown'
-            )
-            return
+            # Слова подтверждения
+            confirm_words = [
+                'да', 'верно', 'правильно', 'ок', 'окей', 'хорошо', 'всё верно',
+                'подтверждаю', 'записывай', 'записать', 'так', 'точно',
+                "ha", "to'g'ri", "tasdiqlash", "yozib ol", "yozish"
+            ]
+            # Слова отказа / исправления
+            fix_words = [
+                'нет', 'неверно', 'не так', 'не то', 'неправильно', 'исправь',
+                'исправить', 'ошибка', 'ошибся', 'переписать', 'измени',
+                "yo'q", "noto'g'ri", "tuzat", "xato", "o'zgartir"
+            ]
+
+            if any(w in text_lower for w in confirm_words):
+                # Подтвердить транзакцию
+                pending = ctx.user_data.pop('pending_voice_tx', None)
+                ctx.user_data.pop('pending_voice_text', None)
+                if pending:
+                    rates     = await asyncio.to_thread(get_rates)
+                    cur       = pending.get('currency', 'UZS')
+                    items_lst = pending.get('items', [])
+                    items_str = json.dumps(items_lst, ensure_ascii=False) if items_lst else ''
+                    add_tx(uid, pending['type'], pending['amount'],
+                           pending.get('description', ''), pending.get('category', '❓ Другое'),
+                           cur, items_str)
+                    # 🎭 ЖИВЫЕ ЭМОЦИИ для голоса
+                    emotion = get_emotion_for_amount(uid, pending['amount'], pending['type'], lang)
+                    reply = fmt_tx_msg(pending, lang, rates) + maybe_motivate(lang) + f"\n\n{emotion}"
+                    await upd.message.reply_text(reply, parse_mode='Markdown')
+                    await maybe_send_insight(uid, lang, ctx)
+                return
+
+            if any(w in text_lower for w in fix_words):
+                # Перейти в режим исправления
+                set_user(uid, onboarding_state='voice_fix_pending')
+                await upd.message.reply_text(
+                    f'🎤 _{text_result}_\n\n'
+                    '✏️ *Что исправить?* Скажи или напиши:\n\n'
+                    '_Например: "сумма 250000" или "категория еда"_'
+                    if lang == 'ru' else
+                    f'🎤 _{text_result}_\n\n'
+                    '✏️ *Nimani tuzatish kerak?* Ayting yoki yozing:\n\n'
+                    '_Masalan: "miqdor 250000" yoki "kategoriya ovqat"_',
+                    parse_mode='Markdown'
+                )
+                return
 
     if state == STATE_BUG_REPORT:
         await handle_bug_report(upd, ctx, text_result, is_voice=True)
@@ -3689,8 +3724,8 @@ def _verify_telegram_webapp(init_data: str) -> int | None:
         data_check_string = '\n'.join(data_check_arr)
 
         secret_key = hmac.new(
-            b'WebAppData',
             BOT_TOKEN.encode(),
+            b'WebAppData',
             hashlib.sha256
         ).digest()
         computed = hmac.new(
