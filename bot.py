@@ -869,8 +869,14 @@ If text contains cancellation (отмени/отменить/bekor) return:
 {"action":"cancel"}
 If text contains "что если", "что будет если", "если я буду", "a agar", "nima bo'ladi agar", "подсчитай сколько", return:
 {"action":"scenario","question":"original user question"}
+If text describes the user having a CURRENT BALANCE on card/account (not a transaction), return:
+{"action":"balance_info","amount":NUMBER}
+Keywords for balance: у меня на карте, на счету, у меня есть, остаток, сейчас на руках, menda bor, kartamda, hisobimda, balansim, pulim bor
+If text means the user has PAID OFF or CLOSED a debt (закрыл кредит, оплатил кредит, погасил долг, выплатил, kredito to'ladim, qarzni yopdim, kredit to'liq to'ladim), return:
+{"action":"debt_paid","amount":NUMBER_OR_NULL}
 If text is about adding/recording a debt or loan, return {"action":"add_debt"}
-Keywords for debt: добавить кредит, записать кредит, у меня кредит, взял кредит, есть долг, новый кредит, мой кредит, кредит в банке, Капиталбанк, Хамкорбанк, Ипотека, kredit qo'sh, qarz qo'sh, kreditim bor, qarzim bor, qarzimni yoz, kredit oldim, qarz oldim, yangi kredit, kreditni qo'shmoqchiman, oylik to'lov, kredit yoz, kreditga oldim, bankdan oldim, ипотека"""
+Keywords for debt: добавить кредит, записать кредит, у меня кредит, взял кредит, есть долг, новый кредит, мой кредит, кредит в банке, Капиталбанк, Хамкорбанк, Ипотека, kredit qo'sh, qarz qo'sh, kreditim bor, qarzim bor, qarzimni yoz, kredit oldim, qarz oldim, yangi kredit, kreditni qo'shmoqchiman, oylik to'lov, kredit yoz, kreditga oldim, bankdan oldim, ипотека
+If no amount is mentioned, return {"action":"no_amount"} instead of guessing amount"""
 
 _PHOTO_SYS = """Read this receipt or financial document.
 Return ONLY valid JSON:
@@ -979,11 +985,18 @@ async def ai_extract_name(text: str) -> str | None:
         raw = await asyncio.to_thread(_chat, _NAME_EXTRACT_SYS, text, 100)
         raw = raw.replace('```json', '').replace('```', '').strip()
         data = json.loads(raw)
-        return data.get('name')
+        name = data.get('name')
+        if name and isinstance(name, str) and len(name.strip()) >= 2:
+            return name.strip()[:50]  # limit length
     except Exception as e:
         logger.warning(f'Name extraction failed: {e}')
-        words = text.strip().split()
-        return words[0].capitalize() if words else None
+    # Fallback: find capitalized word(s) that look like a name
+    words = text.strip().split()
+    for word in words:
+        cleaned = word.strip('.,!?«»"\'').capitalize()
+        if len(cleaned) >= 2 and cleaned[0].isupper():
+            return cleaned[:50]
+    return words[0].capitalize()[:50] if words else None
 
 
 _GENDER_SYS = """Analyze the name and determine gender.
@@ -2295,6 +2308,17 @@ async def on_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(reply, parse_mode='Markdown')
         return
 
+    # ─── BUG 6: Отмена записи через inline-кнопку ───
+    if data == 'undo_last_tx':
+        if delete_last_tx(uid):
+            await q.answer('🗑')
+            await q.edit_message_text(
+                '🗑 Запись отменена.' if lang == 'ru' else "🗑 Yozuv bekor qilindi."
+            )
+        else:
+            await q.answer('❌ Нечего отменять' if lang == 'ru' else "❌ Bekor qilish mumkin emas")
+        return
+
     await q.answer()
 
 # ────────────────────────── TEXT HANDLER ──────────────────────────
@@ -2687,6 +2711,61 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
                 await upd.message.reply_text(tx(lang, 'no_data'), parse_mode='Markdown')
             return
 
+        # ── BUG 1: debt_paid — пользователь закрыл/оплатил кредит ──
+        if action == 'debt_paid':
+            amount_val = parsed.get('amount')
+            if amount_val and float(amount_val) > 0:
+                # Записать как расход с категорией Кредит
+                add_tx(uid, 'exp', float(amount_val), 'Платёж по кредиту', '💳 Кредит', 'UZS', '')
+                rates_w = await asyncio.to_thread(get_rates)
+                parsed_tx = {
+                    'type': 'exp',
+                    'amount': float(amount_val),
+                    'description': 'Платёж по кредиту',
+                    'category': '💳 Кредит',
+                    'currency': 'UZS',
+                    'items': []
+                }
+                reply = fmt_tx_msg(parsed_tx, lang, rates_w)
+                await upd.message.reply_text(
+                    reply + '\n\n💳 Записала как платёж по кредиту!',
+                    parse_mode='Markdown'
+                )
+            else:
+                await upd.message.reply_text(
+                    '💳 Чтобы записать платёж по кредиту — зайди в /debts и нажми "Внести платёж".'
+                    if lang == 'ru' else
+                    "💳 Kredit to'lovini yozish uchun /debts ga kiring va \"To'lov qilish\" tugmasini bosing.",
+                    parse_mode='Markdown'
+                )
+            return
+
+        # ── BUG 3: balance_info — пользователь говорит об остатке, не о транзакции ──
+        if action == 'balance_info':
+            reported_balance = parsed.get('amount', 0)
+            if reported_balance:
+                stats_b = get_stats(uid)
+                actual_balance = stats_b['inc'] - stats_b['exp']
+                diff = reported_balance - actual_balance
+                if lang == 'ru':
+                    msg = (
+                        f"📊 Спасибо за информацию!\n\n"
+                        f"По моим данным твой баланс: `{uzs(actual_balance)}`\n"
+                        f"Ты говоришь что на карте: `{uzs(reported_balance)}`\n\n"
+                    )
+                    if abs(diff) > 100:
+                        msg += f"💡 Разница: `{uzs(abs(diff))}` — возможно, не все транзакции записаны?"
+                else:
+                    msg = f"📊 Ma'lumot uchun rahmat! Balans: `{uzs(reported_balance)}`"
+                await upd.message.reply_text(msg, parse_mode='Markdown')
+            return
+
+        # ── BUG 2: no_amount — AI вернул действие без суммы ──
+        if action == 'no_amount':
+            # Возможно пользователь пишет категорию к предыдущей транзакции — игнорируем
+            await upd.message.reply_text(tx(lang, 'parse_error'), parse_mode='Markdown')
+            return
+
         if action == 'add_debt':
             set_debt_state(uid, target=1, current=0, temp={})
             set_user(uid, onboarding_state=STATE_DEBT_BANK)
@@ -2820,11 +2899,23 @@ async def _process_text_input(uid: int, chat_id: int, text: str, lang: str,
         # ИЗМЕНЕНИЕ 5: Проверка и отправка инсайта
         await maybe_send_insight(uid, lang, ctx)
 
-        # Если в сообщении есть вопрос — дополнительно ответить через AI
-        question_markers = ['?', '??', 'почему', 'как', 'много', 'мало', 'нормально', 'стоит', 'советуешь',
-                            'nima', 'qanday', 'ko\'p', 'oz', 'normal', 'maslahat']
-        text_lower = text.lower()
-        if any(m in text_lower for m in question_markers):
+        # ── BUG 6: Добавить кнопку отмены после транзакции ──
+        undo_kb = [[InlineKeyboardButton(
+            '🗑 Отменить запись' if lang == 'ru' else "🗑 Yozuvni bekor qilish",
+            callback_data='undo_last_tx'
+        )]]
+        await upd.message.reply_text(
+            tx(lang, 'added') + ' ' + (tx(lang, 'cancelled') if lang == 'uz' else ''),
+            reply_markup=InlineKeyboardMarkup(undo_kb)
+        )
+
+        # ── BUG 5: Используем regex для точного поиска целых слов ──
+        import re as _re_qmark
+        _QUESTION_MARKERS_RE = _re_qmark.compile(
+            r'\b(почему|как именно|сколько|много ли|мало|нормально ли|стоит ли|советуешь|'
+            r'nima|qanday|ko\'p mi|oz mi|normal mi|maslahat)\b|[?][?]?|[?]'
+        )
+        if _QUESTION_MARKERS_RE.search(text.lower()):
             ai_reply = await ai_chat(uid, lang, text, ctx)
             await upd.message.reply_text(ai_reply, parse_mode='Markdown')
 
@@ -3598,11 +3689,15 @@ def _verify_telegram_webapp(init_data: str) -> int | None:
         data_check_string = '\n'.join(data_check_arr)
 
         secret_key = hmac.new(
-            BOT_TOKEN.encode(),
             b'WebAppData',
+            BOT_TOKEN.encode(),
             hashlib.sha256
         ).digest()
-        computed = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+        computed = hmac.new(
+            secret_key,
+            data_check_string.encode(),
+            hashlib.sha256
+        ).hexdigest()
 
         if not hmac.compare_digest(computed, check_hash):
             return None
