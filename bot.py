@@ -3724,8 +3724,8 @@ def _verify_telegram_webapp(init_data: str) -> int | None:
         data_check_string = '\n'.join(data_check_arr)
 
         secret_key = hmac.new(
-            BOT_TOKEN.encode(),
             b'WebAppData',
+            BOT_TOKEN.encode(),
             hashlib.sha256
         ).digest()
         computed = hmac.new(
@@ -3738,7 +3738,7 @@ def _verify_telegram_webapp(init_data: str) -> int | None:
             return None
 
         auth_date = int(parsed.get('auth_date', 0))
-        if datetime.now().timestamp() - auth_date > 300:
+        if datetime.now().timestamp() - auth_date > 3600:
             return None
 
         user_data = json.loads(parsed.get('user', '{}'))
